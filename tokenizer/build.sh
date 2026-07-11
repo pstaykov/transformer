@@ -1,0 +1,23 @@
+
+echo ""
+echo "Quelldateien geschrieben. Starte Build ..."
+echo ""
+
+rm -rf "${BUILD_DIR}"
+cmake -S . -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+cmake --build "${BUILD_DIR}" -j"${JOBS}"
+
+echo ""
+echo "============================================================"
+echo " Build erfolgreich!"
+echo ""
+echo " Training starten:"
+echo "   ./${BUILD_DIR}/train_tokenizer \\"
+echo "       --data-dir ./data.txt \\"
+echo "       --output-dir ./tok_out \\"
+echo "       --vocab-size 151643"
+echo ""
+echo " Test:"
+echo "   ./${BUILD_DIR}/test_tokenizer \\"
+echo "       --tokenizer-path ./tok_out/tokenizer.bbpe"
+echo "============================================================"

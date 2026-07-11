@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Tokenizer training/output artifacts
+tok_out/
+*.bbpe
+
+# Editor/OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store

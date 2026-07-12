@@ -1,9 +1,12 @@
 import numpy as np
 from utils.softmax import softmax
+from utils import fp8
 
 
 class AttnHead:
-    """Single-head scaled dot-product attention.
+    """Scaled dot-product attention, vectorized across an arbitrary batch of
+    leading dimensions (e.g. (B, T, d_head) for one head, or (B, H, T, d_head)
+    for all heads at once via a single batched matmul).
 
     mask looks like this for example:
     [[1, 1, 1, 0, 0],
@@ -25,35 +28,35 @@ class AttnHead:
         """Compute the attention output.
 
         Args:
-            Q: Query matrix of shape (B, D, D_head)
-            K: Key matrix of shape (B, D, D_head)
-            V: Value matrix of shape (B, D, D_head)
-            M: Bias matrix of shape (B, D, D)
-            mask: Optional mask of shape (B, D, D)
+            Q: Query array of shape (..., T, d_head)
+            K: Key array of shape (..., T, d_head)
+            V: Value array of shape (..., T, d_head)
+            M: Bias array broadcastable to (..., T, T)
+            mask: Optional mask broadcastable to (..., T, T)
         """
         self.Q, self.K, self.V, self.M, self.mask = Q, K, V, M, mask
         self.d_head = Q.shape[-1]
 
-        scores = np.matmul(Q, K.transpose(0, 2, 1)) / np.sqrt(self.d_head) + M
+        scores = fp8.matmul(Q, K.swapaxes(-1, -2)) / np.sqrt(self.d_head) + M
 
         if mask is not None:
             scores = scores + mask * -1e9
 
         self.attention_weights = self.softmax.forward(scores, axis=-1)
-        output = np.matmul(self.attention_weights, V)
+        output = fp8.matmul(self.attention_weights, V)
 
         return output, self.attention_weights
 
     def backward(self, dL_doutput):
         """Compute the gradients of Q, K, V, M given the gradient of the output."""
-        dL_dV = np.matmul(self.attention_weights.transpose(0, 2, 1), dL_doutput)
-        dL_dattn = np.matmul(dL_doutput, self.V.transpose(0, 2, 1))
+        dL_dV = fp8.matmul(self.attention_weights.swapaxes(-1, -2), dL_doutput)
+        dL_dattn = fp8.matmul(dL_doutput, self.V.swapaxes(-1, -2))
 
         dL_dscores = self.softmax.backward(dL_dattn)
         dL_dM = dL_dscores
 
         scale = 1.0 / np.sqrt(self.d_head)
-        dL_dQ = np.matmul(dL_dscores, self.K) * scale
-        dL_dK = np.matmul(dL_dscores.transpose(0, 2, 1), self.Q) * scale
+        dL_dQ = fp8.matmul(dL_dscores, self.K) * scale
+        dL_dK = fp8.matmul(dL_dscores.swapaxes(-1, -2), self.Q) * scale
 
         return dL_dQ, dL_dK, dL_dV, dL_dM

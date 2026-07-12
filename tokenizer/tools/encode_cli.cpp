@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
 // ============================================================================
 // Python-Bindings (pybind11)
 // ============================================================================
+#ifdef PYBIND_BUILD
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h> // Ermöglicht automatische Konvertierung von std::vector in Python-Listen
 
@@ -76,17 +77,18 @@ PYBIND11_MODULE(bbpe_tokenizer, m) {
     m.doc() = "Python-Bindings für den C++ Byte-Pair-Encoding Tokenizer";
 
     py::class_<Tokenizer>(m, "Tokenizer")
-        .def_static("load_binary", &Tokenizer::load_binary, 
+        .def_static("load_binary", &Tokenizer::load_binary,
                     py::arg("path"), "Lädt ein binäres Tokenizer-Modell")
-        
-        // Falls encode in deiner bpe_model.hpp auch zwei Parameter hat, 
+
+        // Falls encode in deiner bpe_model.hpp auch zwei Parameter hat,
         // musst du es hier ebenfalls anpassen. Ich gehe erstmal von einem aus:
-        .def("encode", &Tokenizer::encode, 
+        .def("encode", &Tokenizer::encode,
                     py::arg("text"), "Codiert einen Text in Token-IDs")
-        
+
         // HIER IST DIE ÄNDERUNG: Wir fügen das zweite py::arg für den bool hinzu!
         // Du kannst den Namen "skip_special" anpassen, je nachdem was der bool macht.
-        .def("decode", &Tokenizer::decode, 
-                    py::arg("ids"), py::arg("skip_special") = true, 
+        .def("decode", &Tokenizer::decode,
+                    py::arg("ids"), py::arg("skip_special") = true,
                     "Decodiert Token-IDs zurück in Text");
 }
+#endif // PYBIND_BUILD

@@ -1,0 +1,10 @@
+The old lighthouse stood at the edge of the cliff, its lamp turning slowly through the fog.
+Every night the keeper climbed the spiral stairs to trim the wick and polish the glass.
+Ships far out on the water watched for that single point of light before they trusted the rocks below.
+Byte-pair encoding compresses common substrings so that frequent words become single tokens.
+A transformer learns to predict the next token by attending to everything that came before it.
+RMSNorm rescales a vector by its root mean square instead of subtracting the mean like LayerNorm does.
+SwiGLU multiplies a swish-activated gate by a linear value projection inside the feed-forward block.
+Attention lets each position look at every earlier position and decide how much weight to give it.
+Gradients flow backward through the network, layer by layer, until every weight has been nudged.
+With enough data and enough steps, even a small model starts to capture the shape of language.

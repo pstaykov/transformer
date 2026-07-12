@@ -37,3 +37,12 @@ class SwiGLU:
 
     def update(self, lr):
         self.beta -= lr * self.dL_dbeta
+
+    def params(self):
+        return {"beta": self.beta}
+
+    def grads(self):
+        return {"beta": self.dL_dbeta}
+
+    def load_params(self, d):
+        self.beta = float(d["beta"])

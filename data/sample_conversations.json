@@ -1,0 +1,36 @@
+[
+  {
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant that explains machine learning concepts simply."},
+      {"role": "user", "content": "What does RMSNorm do?"},
+      {"role": "assistant", "content": "RMSNorm rescales a vector by its root mean square instead of subtracting the mean like LayerNorm does. It keeps the direction of the vector but normalizes its magnitude, which is cheaper to compute and works well in practice."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "user", "content": "How does attention work in a transformer?"},
+      {"role": "assistant", "content": "Attention lets each position look at every earlier position and decide how much weight to give it, so the model can pull in relevant context from anywhere in the sequence."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "user", "content": "What is SwiGLU?"},
+      {"role": "assistant", "content": "SwiGLU multiplies a swish-activated gate by a linear value projection inside the feed-forward block. It tends to train a bit better than a plain ReLU MLP."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant that explains machine learning concepts simply."},
+      {"role": "user", "content": "Why do we use byte-pair encoding for tokenization?"},
+      {"role": "assistant", "content": "Byte-pair encoding compresses common substrings so that frequent words become single tokens, which keeps sequences shorter without needing a fixed word-level vocabulary."},
+      {"role": "user", "content": "Does that help with rare words too?"},
+      {"role": "assistant", "content": "Yes, rare or unseen words just get split into smaller known subword pieces instead of becoming a single unknown token."}
+    ]
+  },
+  {
+    "messages": [
+      {"role": "user", "content": "How do gradients flow through a deep network?"},
+      {"role": "assistant", "content": "Gradients flow backward through the network, layer by layer, until every weight has been nudged in the direction that reduces the loss."}
+    ]
+  }
+]

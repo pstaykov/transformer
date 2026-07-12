@@ -32,6 +32,13 @@ tok_out/
 tok_out_kevindata/
 *.bbpe
 
+# Training run artifacts
+checkpoints/
+*.ckpt
+metrics.csv
+sft_ckpts/
+sft_metrics.csv
+
 # Datasets
 /KEVINDATA
 

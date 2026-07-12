@@ -22,6 +22,7 @@ struct Args {
     std::string output_dir;
     std::string text_field = "text";
     size_t vocab_size = 151'643;
+    uint64_t min_frequency = 20;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -34,6 +35,7 @@ Args parse_args(int argc, char** argv) {
         else if (s=="--output-dir")  a.output_dir  = nxt();
         else if (s=="--text-field")  a.text_field  = nxt();
         else if (s=="--vocab-size")  a.vocab_size  = std::stoul(nxt());
+        else if (s=="--min-frequency") a.min_frequency = std::stoull(nxt());
         else std::cerr << "[WARN] Unbekanntes Argument: " << s << "\n";
     }
     if (a.data_dirs.empty()||a.output_dir.empty())
@@ -53,6 +55,7 @@ int main(int argc, char** argv) {
         TrainerConfig cfg;
         cfg.vocab_size_regular = args.vocab_size;
         cfg.text_field         = args.text_field;
+        cfg.min_frequency      = args.min_frequency;
 
         BpeTrainer trainer(cfg);
         BpeModel model = trainer.train(reader);

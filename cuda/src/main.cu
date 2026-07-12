@@ -8,7 +8,7 @@
 //
 // Usage:
 //   ./train_transformer_cuda [--corpus path] [--data-format text|chat]
-//       [--tokenizer byte|bbpe] [--tokenizer-path path] [--vocab-size N]
+//       [--max-bytes N] [--tokenizer byte|bbpe] [--tokenizer-path path] [--vocab-size N]
 //       [--d-model N] [--num-heads N] [--num-layers N] [--d-ff N] [--seq-len N]
 //       [--batch-size N] [--steps N] [--lr F] [--seed N] [--fp8]
 //       [--log-every N] [--checkpoint-every N] [--checkpoint-dir dir]
@@ -55,6 +55,7 @@ struct Args {
     std::string tokenizer = "byte";       // byte | bbpe
     std::string tokenizer_path = "../tokenizer/tok_out/tokenizer.bbpe";
     int vocab_size = 32000;               // only used with --tokenizer bbpe
+    size_t max_bytes = 0;                 // cap on how much of --corpus is read (text format only); 0 = unlimited
 
     int d_model = 512;
     int num_heads = 8;
@@ -91,6 +92,7 @@ static Args parse_args(int argc, char** argv) {
         else if (flag == "--tokenizer") a.tokenizer = next("--tokenizer");
         else if (flag == "--tokenizer-path") a.tokenizer_path = next("--tokenizer-path");
         else if (flag == "--vocab-size") a.vocab_size = std::stoi(next("--vocab-size"));
+        else if (flag == "--max-bytes") a.max_bytes = (size_t)std::stoull(next("--max-bytes"));
         else if (flag == "--d-model") a.d_model = std::stoi(next("--d-model"));
         else if (flag == "--num-heads") a.num_heads = std::stoi(next("--num-heads"));
         else if (flag == "--num-layers") a.num_layers = std::stoi(next("--num-layers"));
@@ -171,7 +173,7 @@ int main(int argc, char** argv) {
 
     Dataset data = (args.data_format == "chat")
                        ? load_chat_dataset(tokenizer, args.corpus)
-                       : load_text_dataset(tokenizer, args.corpus);
+                       : load_text_dataset(tokenizer, args.corpus, args.max_bytes);
 
     if ((int)data.ids.size() <= args.seq_len + 1) {
         fprintf(stderr, "[error] corpus has only %zu tokens, need > seq_len+1 (%d)\n",

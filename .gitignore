@@ -29,7 +29,11 @@ Makefile
 
 # Tokenizer training/output artifacts
 tok_out/
+tok_out_kevindata/
 *.bbpe
+
+# Datasets
+/KEVINDATA
 
 # Editor/OS cruft
 .vscode/

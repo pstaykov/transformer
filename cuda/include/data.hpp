@@ -328,6 +328,40 @@ inline std::string read_file(const std::string& path) {
     return ss.str();
 }
 
+// Same as read_file, but reads at most max_bytes (0 = unlimited). Seeks/reads
+// directly into a single right-sized buffer instead of slurping the whole
+// file via rdbuf() and truncating after the fact - important for corpora
+// that are a large fraction of (or bigger than) system RAM, where even a
+// transient full-file copy can OOM the box.
+inline std::string read_file_capped(const std::string& path, size_t max_bytes) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        fprintf(stderr, "[data] could not open %s\n", path.c_str());
+        exit(EXIT_FAILURE);
+    }
+    f.seekg(0, std::ios::end);
+    std::streamoff file_size = f.tellg();
+    if (file_size < 0) {
+        fprintf(stderr, "[data] could not determine size of %s\n", path.c_str());
+        exit(EXIT_FAILURE);
+    }
+    size_t read_size = (size_t)file_size;
+    if (max_bytes > 0 && max_bytes < read_size) read_size = max_bytes;
+    f.seekg(0, std::ios::beg);
+
+    std::string buf(read_size, '\0');
+    f.read(&buf[0], (std::streamsize)read_size);
+    if ((size_t)f.gcount() != read_size) {
+        fprintf(stderr, "[data] short read on %s (%zu of %zu bytes)\n", path.c_str(), (size_t)f.gcount(), read_size);
+        exit(EXIT_FAILURE);
+    }
+    if (max_bytes > 0 && (size_t)file_size > max_bytes) {
+        printf("[data] %s is %.2f GB; capped read at %.2f GB (--max-bytes)\n",
+               path.c_str(), file_size / 1e9, read_size / 1e9);
+    }
+    return buf;
+}
+
 inline std::string strip(const std::string& s) {
     size_t a = 0, b = s.size();
     while (a < b && std::isspace((unsigned char)s[a])) a++;
@@ -457,8 +491,10 @@ inline Dataset load_chat_dataset(const DataTokenizer& tok, const std::string& pa
 }
 
 // Build a plain-text dataset: every token is a valid prediction target.
-inline Dataset load_text_dataset(const DataTokenizer& tok, const std::string& path) {
-    std::string text = data_detail::read_file(path);
+// max_bytes caps how much of the file is read (0 = unlimited); see
+// read_file_capped for why this matters on multi-GB corpora.
+inline Dataset load_text_dataset(const DataTokenizer& tok, const std::string& path, size_t max_bytes = 0) {
+    std::string text = data_detail::read_file_capped(path, max_bytes);
     Dataset d;
     d.ids = tok.encode(text);
     d.mask.assign(d.ids.size(), 1);

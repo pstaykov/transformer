@@ -24,6 +24,7 @@ from utils.losses import CrossEntropyLoss
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils import fp8
 from utils import chat as chat_utils
+from utils import notify as notify_utils
 
 try:
     import bbpe_tokenizer
@@ -115,6 +116,13 @@ def main():
     parser.add_argument("--metrics-path", default="metrics.csv")
     parser.add_argument("--resume", default=None, help="path to a .npz checkpoint to resume from")
 
+    parser.add_argument("--email-every", type=int, default=10000,
+                         help="send a 'KEVIN said: ...' progress email every N steps (0 disables)")
+    parser.add_argument("--email-tokens", type=int, default=20,
+                         help="number of tokens for Kevin to generate per email")
+    parser.add_argument("--email-config", default="email.env",
+                         help="path to a KEY=VALUE file with EMAIL_USER/EMAIL_PASS/EMAIL_TO")
+
     args = parser.parse_args()
     rng = np.random.default_rng(args.seed)
 
@@ -148,6 +156,11 @@ def main():
     if args.resume:
         start_step, meta = load_checkpoint(args.resume, model)
         print(f"Resumed from {args.resume} at step {start_step} (meta={meta})")
+
+    email_config = notify_utils.load_env_file(args.email_config) if args.email_every > 0 else {}
+    if args.email_every > 0 and not email_config:
+        print(f"Warning: --email-every={args.email_every} but no config found at "
+              f"{args.email_config}; progress emails will be skipped. See utils/notify.py.")
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     metrics_is_new = not os.path.exists(args.metrics_path)
@@ -187,6 +200,19 @@ def main():
             save_checkpoint(ckpt_path, model, step, extra={"loss": loss})
             save_checkpoint(os.path.join(args.checkpoint_dir, "latest.npz"), model, step, extra={"loss": loss})
             print(f"  saved checkpoint -> {ckpt_path}")
+
+        if args.email_every > 0 and email_config and step > start_step and step % args.email_every == 0:
+            try:
+                samples = notify_utils.notify_progress(
+                    model, tokenizer, step, email_config,
+                    max_len=args.seq_len, num_tokens=args.email_tokens,
+                    stats={"loss": f"{loss:.4f}", "perplexity": f"{perplexity:.2f}"},
+                    metrics_path=args.metrics_path,
+                )
+                for prompt, completion in samples:
+                    print(f"  emailed progress ({prompt!r}) -> KEVIN said: {completion}")
+            except Exception as e:
+                print(f"  failed to send progress email: {e}")
 
     final_step = start_step + args.steps - 1
     final_ckpt = os.path.join(args.checkpoint_dir, f"ckpt_step{final_step}.npz")

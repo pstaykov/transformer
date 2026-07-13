@@ -42,6 +42,9 @@ sft_metrics.csv
 # Datasets
 /KEVINDATA
 
+# Email credentials for training progress notifications
+email.env
+
 # Editor/OS cruft
 .vscode/
 .idea/

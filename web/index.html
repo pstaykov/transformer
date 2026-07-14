@@ -144,7 +144,7 @@
           same architecture, same init scales, same numerics, same checkpoints.
         </p>
         <p>
-          Roughly sixteen hand-written kernels — <code>k_rmsnorm_backward</code>,
+          Twenty-three hand-written kernels — <code>k_rmsnorm_backward</code>,
           <code>k_swiglu_backward</code>, <code>k_softmax_forward</code>,
           <code>k_embedding_backward</code> and friends — with shared-memory block reductions
           and atomic gradient accumulation. cuBLAS handles the matmuls; everything

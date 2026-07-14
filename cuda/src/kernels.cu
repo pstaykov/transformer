@@ -1,6 +1,7 @@
 #include "kernels.cuh"
 #include "common.cuh"
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 #include <cfloat>
 #include <cmath>
 
@@ -54,6 +55,57 @@ __global__ void k_sgd_update(float* param, const float* grad, float lr, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     param[idx] -= lr * grad[idx];
+}
+
+__global__ void k_adam_update(float* param, const float* grad, float* m, float* v,
+                               float lr, float beta1, float beta2, float eps,
+                               float bc1, float bc2, float weight_decay, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    float g = grad[idx];
+    float mi = beta1 * m[idx] + (1.0f - beta1) * g;
+    float vi = beta2 * v[idx] + (1.0f - beta2) * g * g;
+    m[idx] = mi;
+    v[idx] = vi;
+    float mhat = mi / bc1;
+    float vhat = vi / bc2;
+    param[idx] -= lr * (mhat / (sqrtf(vhat) + eps) + weight_decay * param[idx]);
+}
+
+__global__ void k_grad_sumsq(const float* grad, float* accum, int n) {
+    extern __shared__ float shared[];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float val = (idx < n) ? grad[idx] * grad[idx] : 0.0f;
+    float s = block_reduce_sum(val, shared);
+    if (threadIdx.x == 0) atomicAdd(accum, s);
+}
+
+__global__ void k_scale_inplace(float* buf, float scale, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    buf[idx] *= scale;
+}
+
+// Inverted dropout: kept elements are scaled by 1/keep_prob so eval-mode
+// (dropout off) needs no rescaling. Each element gets its own Philox stream
+// keyed on (seed, idx, offset) - offset is bumped by the caller every forward
+// call so the same elements don't get the same mask on the next step.
+__global__ void k_dropout_forward(const float* x, float* y, float* mask, float keep_prob,
+                                   unsigned long long seed, unsigned long long offset, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, (unsigned long long)idx, offset, &state);
+    float r = curand_uniform(&state);
+    float m = (r < keep_prob) ? (1.0f / keep_prob) : 0.0f;
+    mask[idx] = m;
+    y[idx] = x[idx] * m;
+}
+
+__global__ void k_dropout_backward(const float* dOut, const float* mask, float* dX, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    dX[idx] = dOut[idx] * mask[idx];
 }
 
 __global__ void k_residual_add(float* out, const float* a, const float* b, int n) {
@@ -237,8 +289,16 @@ __global__ void k_merge_heads(const float* x, float* out, int B, int T, int H, i
     out[((long long)b * T + t) * D + h * dh + d] = x[idx];
 }
 
+// Label smoothing (Szegedy et al.): the target distribution puts mass
+// (1-eps) on the true class and eps/V spread uniformly over the whole vocab,
+// instead of a one-hot target. That keeps the model from driving the true-class
+// logit to +inf relative to the rest (past a point it just enlarges weight norms
+// rather than improving predictions), which shows up as a loss floor/plateau
+// like the one that motivated this. Loss = -(1-eps)*log p(target) - (eps/V) *
+// sum_v log p(v); eps=0 reproduces plain cross-entropy exactly.
 __global__ void k_cross_entropy_forward(const float* logits, const int* targets, float* probs_out,
-                                         float* loss_sum, int* n_valid, int V, int ignore_index) {
+                                         float* loss_sum, int* n_valid, int V, int ignore_index,
+                                         float label_smoothing) {
     extern __shared__ float shared[];
     int row = blockIdx.x;
     const float* lr = logits + (size_t)row * V;
@@ -257,11 +317,19 @@ __global__ void k_cross_entropy_forward(const float* logits, const int* targets,
     float row_sum = block_reduce_sum(local_sum, shared);
     for (int v = threadIdx.x; v < V; v += blockDim.x) pr[v] /= row_sum;
 
+    float local_logsum = 0.0f;
+    if (label_smoothing > 0.0f) {
+        for (int v = threadIdx.x; v < V; v += blockDim.x) local_logsum += logf(fmaxf(pr[v], 1e-12f));
+    }
+    float row_logsum = block_reduce_sum(local_logsum, shared);
+
     if (threadIdx.x == 0) {
         int target = targets[row];
         if (target != ignore_index) {
             float p = fmaxf(pr[target], 1e-12f);
-            atomicAdd(loss_sum, -logf(p));
+            float loss = -(1.0f - label_smoothing) * logf(p);
+            if (label_smoothing > 0.0f) loss -= (label_smoothing / V) * row_logsum;
+            atomicAdd(loss_sum, loss);
             atomicAdd(n_valid, 1);
         }
     }
@@ -292,19 +360,21 @@ __global__ void k_quantize_e4m3(const float* in, float* out, int n) {
 }
 
 __global__ void k_cross_entropy_backward(const float* probs, const int* targets, float* dLogits,
-                                          int n_valid, int V, int ignore_index) {
+                                          int n_valid, int V, int ignore_index, float label_smoothing) {
     int row = blockIdx.x;
     const float* pr = probs + (size_t)row * V;
     float* dr = dLogits + (size_t)row * V;
     int target = targets[row];
     float inv_n = 1.0f / fmaxf((float)n_valid, 1.0f);
+    float off_target_q = label_smoothing / V;
+    float target_q = (1.0f - label_smoothing) + off_target_q;
 
     for (int v = threadIdx.x; v < V; v += blockDim.x) {
         if (target == ignore_index) {
             dr[v] = 0.0f;
         } else {
-            float grad = pr[v] - (v == target ? 1.0f : 0.0f);
-            dr[v] = grad * inv_n;
+            float q = (v == target) ? target_q : off_target_q;
+            dr[v] = (pr[v] - q) * inv_n;
         }
     }
 }
@@ -322,6 +392,35 @@ void launch_bias_grad(const float* dy, float* db, int rows, int cols) {
 
 void launch_sgd_update(float* param, const float* grad, float lr, int n) {
     k_sgd_update<<<ceil_div(n, BLOCK), BLOCK>>>(param, grad, lr, n);
+}
+
+void launch_adam_update(float* param, const float* grad, float* m, float* v,
+                         float lr, float beta1, float beta2, float eps,
+                         float bc1, float bc2, float weight_decay, int n) {
+    if (n <= 0) return;
+    k_adam_update<<<ceil_div(n, BLOCK), BLOCK>>>(param, grad, m, v, lr, beta1, beta2, eps, bc1, bc2, weight_decay, n);
+}
+
+void launch_grad_sumsq(const float* grad, float* accum, int n) {
+    if (n <= 0) return;
+    int blocks = ceil_div(n, BLOCK);
+    k_grad_sumsq<<<blocks, BLOCK, BLOCK * sizeof(float)>>>(grad, accum, n);
+}
+
+void launch_scale_inplace(float* buf, float scale, int n) {
+    if (n <= 0) return;
+    k_scale_inplace<<<ceil_div(n, BLOCK), BLOCK>>>(buf, scale, n);
+}
+
+void launch_dropout_forward(const float* x, float* y, float* mask, float keep_prob,
+                             unsigned long long seed, unsigned long long offset, int n) {
+    if (n <= 0) return;
+    k_dropout_forward<<<ceil_div(n, BLOCK), BLOCK>>>(x, y, mask, keep_prob, seed, offset, n);
+}
+
+void launch_dropout_backward(const float* dOut, const float* mask, float* dX, int n) {
+    if (n <= 0) return;
+    k_dropout_backward<<<ceil_div(n, BLOCK), BLOCK>>>(dOut, mask, dX, n);
 }
 
 void launch_residual_add(float* out, const float* a, const float* b, int n) {
@@ -389,22 +488,25 @@ void launch_merge_heads(const float* x, float* out, int B, int T, int H, int dh)
 }
 
 void launch_cross_entropy_forward(const float* logits, const int* targets, float* probs_out,
-                                   float* loss_sum, int* n_valid, int rows, int V, int ignore_index) {
+                                   float* loss_sum, int* n_valid, int rows, int V, int ignore_index,
+                                   float label_smoothing) {
     int threads = min(V, BLOCK);
     k_cross_entropy_forward<<<rows, threads, threads * sizeof(float)>>>(
-        logits, targets, probs_out, loss_sum, n_valid, V, ignore_index);
+        logits, targets, probs_out, loss_sum, n_valid, V, ignore_index, label_smoothing);
 }
 
 void launch_cross_entropy_backward(const float* probs, const int* targets, float* dLogits,
-                                    int n_valid, int rows, int V, int ignore_index) {
+                                    int n_valid, int rows, int V, int ignore_index,
+                                    float label_smoothing) {
     int threads = min(V, BLOCK);
-    k_cross_entropy_backward<<<rows, threads>>>(probs, targets, dLogits, n_valid, V, ignore_index);
+    k_cross_entropy_backward<<<rows, threads>>>(probs, targets, dLogits, n_valid, V, ignore_index, label_smoothing);
 }
 
 // ----------------------------------------------------------------------------
 // FP8 simulation
 // ----------------------------------------------------------------------------
 bool g_fp8_enabled = false;
+bool g_training = true;
 
 void launch_quantize_e4m3(const float* in, float* out, int n) {
     if (n <= 0) return;

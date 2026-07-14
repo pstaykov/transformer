@@ -491,12 +491,96 @@ inline Dataset load_chat_dataset(const DataTokenizer& tok, const std::string& pa
 }
 
 // Build a plain-text dataset: every token is a valid prediction target.
-// max_bytes caps how much of the file is read (0 = unlimited); see
-// read_file_capped for why this matters on multi-GB corpora.
+// max_bytes caps how much of the file is read (0 = unlimited).
+//
+// Streams the file in fixed-size chunks (split on the last newline in each
+// chunk, so a run of BPE merges never spans a chunk boundary except for the
+// whitespace immediately around that newline - negligible for a multi-GB
+// corpus) instead of reading the whole file into one buffer and encoding it
+// in one call. Reading-then-encoding the whole file at once needs the raw
+// text buffer, the tokenizer's own output vector, and the vector<int> copy
+// of it all resident simultaneously (~4x the corpus size), which is what
+// OOM-killed a full run of a 10GB corpus on a 32GB box. Chunking bounds peak
+// memory to one chunk's working set plus the final ids/mask arrays, grown in
+// fixed increments (not exponential doubling) to avoid a reallocation spike
+// near the end of a multi-billion-token run.
 inline Dataset load_text_dataset(const DataTokenizer& tok, const std::string& path, size_t max_bytes = 0) {
-    std::string text = data_detail::read_file_capped(path, max_bytes);
+    constexpr size_t CHUNK_BYTES = 256ull * 1024 * 1024;
+    constexpr size_t GROW_STEP = 256ull * 1024 * 1024;  // elements, not bytes
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        fprintf(stderr, "[data] could not open %s\n", path.c_str());
+        exit(EXIT_FAILURE);
+    }
+    f.seekg(0, std::ios::end);
+    std::streamoff file_size_off = f.tellg();
+    if (file_size_off < 0) {
+        fprintf(stderr, "[data] could not determine size of %s\n", path.c_str());
+        exit(EXIT_FAILURE);
+    }
+    size_t file_size = (size_t)file_size_off;
+    size_t total_to_read = (max_bytes > 0 && max_bytes < file_size) ? max_bytes : file_size;
+    if (max_bytes > 0 && file_size > max_bytes) {
+        printf("[data] %s is %.2f GB; capped read at %.2f GB (--max-bytes)\n",
+               path.c_str(), file_size / 1e9, total_to_read / 1e9);
+    }
+    f.seekg(0, std::ios::beg);
+
+    auto ensure_capacity = [](auto& vec, size_t additional) {
+        size_t needed = vec.size() + additional;
+        if (needed > vec.capacity()) vec.reserve(std::max(needed, vec.capacity() + GROW_STEP));
+    };
+
     Dataset d;
-    d.ids = tok.encode(text);
+    std::string carry;  // bytes left over after the last newline of the previous chunk
+    std::vector<char> buf(CHUNK_BYTES);
+    size_t remaining = total_to_read;
+    size_t chunk_idx = 0;
+
+    while (remaining > 0) {
+        size_t want = std::min(remaining, CHUNK_BYTES);
+        f.read(buf.data(), (std::streamsize)want);
+        size_t got = (size_t)f.gcount();
+        if (got != want) {
+            fprintf(stderr, "[data] short read on %s (%zu of %zu bytes in chunk %zu)\n",
+                    path.c_str(), got, want, chunk_idx);
+            exit(EXIT_FAILURE);
+        }
+        remaining -= got;
+
+        std::string piece = carry + std::string(buf.data(), got);
+        carry.clear();
+
+        std::string chunk_text;
+        if (remaining > 0) {
+            // Hold back everything after the last newline so the next chunk's
+            // encode() sees a whole word/whitespace-run, not half of one.
+            size_t last_nl = piece.find_last_of('\n');
+            if (last_nl == std::string::npos) {
+                // No newline in this whole chunk (e.g. one huge line): carry
+                // it all forward rather than splitting mid-token.
+                carry = std::move(piece);
+                chunk_idx++;
+                continue;
+            }
+            carry = piece.substr(last_nl + 1);
+            chunk_text = piece.substr(0, last_nl + 1);
+        } else {
+            chunk_text = std::move(piece);
+        }
+
+        std::vector<int> ids_chunk = tok.encode(chunk_text);
+        ensure_capacity(d.ids, ids_chunk.size());
+        d.ids.insert(d.ids.end(), ids_chunk.begin(), ids_chunk.end());
+        chunk_idx++;
+    }
+    if (!carry.empty()) {
+        std::vector<int> ids_chunk = tok.encode(carry);
+        ensure_capacity(d.ids, ids_chunk.size());
+        d.ids.insert(d.ids.end(), ids_chunk.begin(), ids_chunk.end());
+    }
+
     d.mask.assign(d.ids.size(), 1);
     return d;
 }

@@ -10,6 +10,20 @@ void launch_bias_grad(const float* dy, float* db, int rows, int cols);
 void launch_sgd_update(float* param, const float* grad, float lr, int n);
 void launch_residual_add(float* out, const float* a, const float* b, int n);
 
+// Adam/AdamW: m,v are per-parameter moment buffers (same size as param),
+// bc1/bc2 are the (1 - beta^t) bias-correction denominators computed by the
+// caller from the optimizer step count. weight_decay is decoupled (AdamW-style,
+// applied directly to param rather than folded into the gradient).
+void launch_adam_update(float* param, const float* grad, float* m, float* v,
+                         float lr, float beta1, float beta2, float eps,
+                         float bc1, float bc2, float weight_decay, int n);
+
+// Sum of squares of `grad`, atomically accumulated into *accum (caller zeroes
+// it first). Used to compute a global gradient norm across many buffers.
+void launch_grad_sumsq(const float* grad, float* accum, int n);
+// In-place elementwise scale, used to rescale gradients for global-norm clipping.
+void launch_scale_inplace(float* buf, float scale, int n);
+
 // Embedding: y[b,t,:] = token_emb[ids[b,t],:] + pos_emb[t,:]
 void launch_embedding_forward(const int* ids, const float* token_emb, const float* pos_emb,
                                float* out, int B, int T, int D);
@@ -42,10 +56,14 @@ void launch_merge_heads(const float* x, float* out, int B, int T, int H, int dh)
 
 // Cross-entropy over the last dim (V) of `rows` rows. targets[row] == ignore_index skips that row.
 // Returns (via out_loss_sum, out_n_valid device scalars) so the host can divide.
+// label_smoothing in [0, 1): 0 reproduces plain cross-entropy. See k_cross_entropy_forward
+// for the smoothed-target math.
 void launch_cross_entropy_forward(const float* logits, const int* targets, float* probs_out,
-                                   float* loss_sum, int* n_valid, int rows, int V, int ignore_index);
+                                   float* loss_sum, int* n_valid, int rows, int V, int ignore_index,
+                                   float label_smoothing);
 void launch_cross_entropy_backward(const float* probs, const int* targets, float* dLogits,
-                                    int n_valid, int rows, int V, int ignore_index);
+                                    int n_valid, int rows, int V, int ignore_index,
+                                    float label_smoothing);
 
 // ---------------------------------------------------------------------------
 // Simulated FP8 (E4M3), the CUDA counterpart of utils/fp8.py. Snaps each value
@@ -56,6 +74,19 @@ void launch_cross_entropy_backward(const float* probs, const int* targets, float
 // the reusable fp8_scratch_* buffers.
 // ---------------------------------------------------------------------------
 extern bool g_fp8_enabled;
+
+// ---------------------------------------------------------------------------
+// Dropout. `g_training` gates it globally (off during eval/inference, e.g.
+// probe.cu) the same way g_fp8_enabled gates the FP8 path above.
+// ---------------------------------------------------------------------------
+extern bool g_training;
+
+// mask[idx] is 1/keep_prob or 0 (inverted dropout), cached for backward.
+// `seed`/`offset` seed a per-element Philox stream so each call (and each
+// element) gets independent randomness without a host round-trip.
+void launch_dropout_forward(const float* x, float* y, float* mask, float keep_prob,
+                             unsigned long long seed, unsigned long long offset, int n);
+void launch_dropout_backward(const float* dOut, const float* mask, float* dX, int n);
 
 void launch_quantize_e4m3(const float* in, float* out, int n);
 

@@ -28,9 +28,10 @@
 struct Linear {
     int in_dim, out_dim;
     bool has_bias;
+    float weight_decay;
 
-    DeviceArray W, dW;
-    DeviceArray b, db;
+    DeviceArray W, dW, mW, vW;
+    DeviceArray b, db, mb, vb;
 
     DeviceArray out;  // (rows, out_dim)
     DeviceArray dX;   // (rows, in_dim)
@@ -38,14 +39,21 @@ struct Linear {
     const float* x_cache = nullptr;
     int rows_cache = 0;
 
-    Linear(int in_dim, int out_dim, bool has_bias, float init_scale, std::mt19937& rng);
+    // weight_decay is AdamW-style decoupled decay applied to W only (never to
+    // the bias). Defaults to 0.01, the standard AdamW value for weight matrices.
+    Linear(int in_dim, int out_dim, bool has_bias, float init_scale, std::mt19937& rng,
+           float weight_decay = 0.01f);
 
     // Returns pointer to internal `out` buffer, shape (rows, out_dim).
     float* forward(cublasHandle_t handle, const float* x, int rows);
     // Returns pointer to internal `dX` buffer, shape (rows, in_dim).
     float* backward(cublasHandle_t handle, const float* dOut);
 
-    void update(float lr);
+    // t is the Adam step count (1-indexed).
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
@@ -55,7 +63,7 @@ struct RMSNorm {
     int d_model;
     float eps;
 
-    DeviceArray gamma, dGamma;
+    DeviceArray gamma, dGamma, mGamma, vGamma;
     DeviceArray out, rms_cache, dX;
 
     const float* x_cache = nullptr;
@@ -66,7 +74,10 @@ struct RMSNorm {
     float* forward(const float* x, int rows);
     float* backward(const float* dOut);
 
-    void update(float lr);
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
@@ -75,6 +86,7 @@ struct RMSNorm {
 struct SwiGLU {
     int d_ff;
     float beta;
+    float m_beta = 0.0f, v_beta = 0.0f;  // Adam state for the scalar beta (kept host-side)
 
     DeviceArray sig_cache, out, dX;
     DeviceArray dBetaAccum;  // single-element device scalar
@@ -87,7 +99,10 @@ struct SwiGLU {
     float* forward(const float* x, int rows);
     float* backward(const float* dOut);
 
-    void update(float lr);
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
@@ -103,7 +118,10 @@ struct MLP {
     float* forward(cublasHandle_t handle, const float* x, int rows);
     float* backward(cublasHandle_t handle, const float* dOut);
 
-    void update(float lr);
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
@@ -134,16 +152,54 @@ struct MultiHeadAttention {
     // dOut: (B, T, D). Returns dX, (B, T, D).
     float* backward(cublasHandle_t handle, const float* dOut);
 
-    void update(float lr);
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
-// Pre-norm transformer block: x = x + attn(ln1(x)); x = x + mlp(ln2(x))
+// Inverted dropout on a flat buffer. forward()/backward() are no-ops (return
+// the input pointer unchanged) whenever !g_training or p<=0, so eval/inference
+// callers (e.g. probe.cu) pay nothing extra as long as they leave g_training
+// at its default or set it false themselves.
+// ---------------------------------------------------------------------------
+struct Dropout {
+    float p;
+    unsigned long long seed;
+    unsigned long long call_counter = 0;
+    bool active_cache = false;
+
+    DeviceArray mask, out, dX;
+
+    Dropout(float p, unsigned long long seed) : p(p), seed(seed) {}
+
+    float* forward(const float* x, int n) {
+        active_cache = g_training && p > 0.0f;
+        if (!active_cache) return const_cast<float*>(x);
+        out.ensure((size_t)n);
+        mask.ensure((size_t)n);
+        launch_dropout_forward(x, out.data, mask.data, 1.0f - p, seed, call_counter, n);
+        ++call_counter;
+        return out.data;
+    }
+
+    float* backward(const float* dOut, int n) {
+        if (!active_cache) return const_cast<float*>(dOut);
+        dX.ensure((size_t)n);
+        launch_dropout_backward(dOut, mask.data, dX.data, n);
+        return dX.data;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Pre-norm transformer block: x = x + drop(attn(ln1(x))); x = x + drop(mlp(ln2(x)))
 // ---------------------------------------------------------------------------
 struct TransformerBlock {
     RMSNorm ln1, ln2;
     MultiHeadAttention attn;
     MLP mlp;
+    Dropout drop_attn, drop_mlp;
 
     DeviceArray x1;    // x + attn_out
     DeviceArray x2;    // x1 + mlp_out
@@ -152,12 +208,15 @@ struct TransformerBlock {
 
     int B_cache = 0, T_cache = 0;
 
-    TransformerBlock(int d_model, int num_heads, int d_ff, std::mt19937& rng);
+    TransformerBlock(int d_model, int num_heads, int d_ff, std::mt19937& rng, float dropout = 0.1f);
 
     float* forward(cublasHandle_t handle, const float* x, int B, int T);
     float* backward(cublasHandle_t handle, const float* dOut);
 
-    void update(float lr);
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
@@ -166,8 +225,8 @@ struct TransformerBlock {
 struct Embedding {
     int vocab_size, d_model, max_len;
 
-    DeviceArray token_emb, d_token_emb;
-    DeviceArray pos_emb, d_pos_emb;
+    DeviceArray token_emb, d_token_emb, m_token_emb, v_token_emb;
+    DeviceArray pos_emb, d_pos_emb, m_pos_emb, v_pos_emb;
     DeviceArray out;  // (B, T, D)
 
     const int* ids_cache = nullptr;
@@ -178,7 +237,11 @@ struct Embedding {
     float* forward(const int* ids, int B, int T);
     void backward(const float* dOut);  // fills d_token_emb / d_pos_emb
 
-    void update(float lr);
+    // No weight decay on embeddings (standard practice; especially not on pos_emb).
+    void update(float lr, int t);
+
+    void accum_grad_sumsq(DeviceArray& accum) const;
+    void scale_grads(float s);
 };
 
 // ---------------------------------------------------------------------------
@@ -188,18 +251,27 @@ struct TransformerModel {
     int vocab_size, d_model, num_heads, num_layers, d_ff, max_len;
 
     Embedding embedding;
+    Dropout drop_embed;
     std::vector<std::unique_ptr<TransformerBlock>> blocks;
     RMSNorm ln_f;
     Linear W_out;  // d_model -> vocab_size, no bias
 
     TransformerModel(int vocab_size, int d_model, int num_heads, int num_layers,
-                      int d_ff, int max_len, std::mt19937& rng);
+                      int d_ff, int max_len, std::mt19937& rng, float dropout = 0.1f);
 
     // ids: device int buffer, shape (B, T). Returns logits, (B, T, vocab_size).
     float* forward(cublasHandle_t handle, const int* ids, int B, int T);
     void backward(cublasHandle_t handle, const float* dLogits);
 
-    void update(float lr);
+    void update(float lr, int t);
+
+    // Global gradient-norm clipping across every parameter's gradient buffer,
+    // computed right after backward() and before update(). Caps the size of any
+    // single step so a batch of unusually spiky gradients can't blow up the
+    // weights (this matters more now that update() also applies a fixed lr
+    // schedule rather than the human eyeballing metrics.csv for a runaway loss).
+    float grad_global_norm();
+    void clip_grad_norm(float max_norm);
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +279,7 @@ struct TransformerModel {
 // ---------------------------------------------------------------------------
 struct CrossEntropyLoss {
     int ignore_index;
+    float label_smoothing;
 
     DeviceArray probs;     // (rows, V)
     DeviceArray dLogits;   // (rows, V)
@@ -216,7 +289,7 @@ struct CrossEntropyLoss {
     const int* targets_cache = nullptr;
     int rows_cache = 0, V_cache = 0, n_valid_cache = 0;
 
-    explicit CrossEntropyLoss(int ignore_index = -100);
+    explicit CrossEntropyLoss(int ignore_index = -100, float label_smoothing = 0.0f);
 
     // logits: (rows, V) device buffer, targets: (rows,) device int buffer.
     // Returns the scalar mean loss (copied back to host).

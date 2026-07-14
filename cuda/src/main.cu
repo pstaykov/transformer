@@ -10,9 +10,18 @@
 //   ./train_transformer_cuda [--corpus path] [--data-format text|chat]
 //       [--max-bytes N] [--tokenizer byte|bbpe] [--tokenizer-path path] [--vocab-size N]
 //       [--d-model N] [--num-heads N] [--num-layers N] [--d-ff N] [--seq-len N]
-//       [--batch-size N] [--steps N] [--lr F] [--seed N] [--fp8]
+//       [--batch-size N] [--steps N] [--lr F] [--min-lr F] [--warmup-steps N]
+//       [--grad-clip F] [--label-smoothing F] [--dropout F] [--seed N] [--fp8]
 //       [--log-every N] [--checkpoint-every N] [--checkpoint-dir dir]
 //       [--metrics-path path] [--resume path] [--reset-step]
+//
+// Optimizer is AdamW (per-parameter m/v moments, decoupled weight decay on
+// weight matrices only) with a linear-warmup + cosine-decay lr schedule
+// (--lr is the post-warmup peak, --min-lr the floor at the end of --steps)
+// and global gradient-norm clipping (--grad-clip, <=0 to disable). Earlier
+// versions used flat-lr, unclipped, un-decayed plain SGD, which is why a long
+// run's loss plateaus/oscillates instead of continuing to fall - see
+// checkpoints/run1/metrics.csv for reference.
 //
 // Supervised fine-tuning (SFT) is just a resume onto conversation data. The
 // architecture is read back from the checkpoint, so only the new data / lr /
@@ -24,7 +33,7 @@
 //   # 2. fine-tune on chat data (same tokenizer, lower lr, its own outputs)
 //   ./train_transformer_cuda --resume checkpoints/latest.ckpt \
 //       --corpus conversations.json --data-format chat --tokenizer bbpe \
-//       --lr 0.01 --steps 300 --reset-step \
+//       --lr 5e-5 --steps 300 --reset-step \
 //       --checkpoint-dir sft_ckpts --metrics-path sft_metrics.csv
 //
 // Only assistant-turn tokens are trained on (user/system turns are masked out
@@ -32,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -64,7 +74,12 @@ struct Args {
     int seq_len = 32;
     int batch_size = 8;
     int steps = 500;
-    float lr = 0.05f;
+    float lr = 3e-4f;          // peak lr; Adam-scale, not the old flat-SGD 0.05
+    float min_lr = 3e-5f;      // cosine decay floor (10% of peak, the usual rule of thumb)
+    int warmup_steps = 200;    // linear warmup from 0 to `lr` at the start of *this* run
+    float grad_clip = 1.0f;    // global grad-norm clip; <=0 disables it
+    float label_smoothing = 0.05f;
+    float dropout = 0.1f;      // embedding + per-block attn/mlp residual dropout
     int seed = 0;
     bool fp8 = false;
 
@@ -101,6 +116,11 @@ static Args parse_args(int argc, char** argv) {
         else if (flag == "--batch-size") a.batch_size = std::stoi(next("--batch-size"));
         else if (flag == "--steps") a.steps = std::stoi(next("--steps"));
         else if (flag == "--lr") a.lr = std::stof(next("--lr"));
+        else if (flag == "--min-lr") a.min_lr = std::stof(next("--min-lr"));
+        else if (flag == "--warmup-steps") a.warmup_steps = std::stoi(next("--warmup-steps"));
+        else if (flag == "--grad-clip") a.grad_clip = std::stof(next("--grad-clip"));
+        else if (flag == "--label-smoothing") a.label_smoothing = std::stof(next("--label-smoothing"));
+        else if (flag == "--dropout") a.dropout = std::stof(next("--dropout"));
         else if (flag == "--seed") a.seed = std::stoi(next("--seed"));
         else if (flag == "--fp8") a.fp8 = true;
         else if (flag == "--log-every") a.log_every = std::stoi(next("--log-every"));
@@ -114,6 +134,23 @@ static Args parse_args(int argc, char** argv) {
     return a;
 }
 
+// Linear warmup (0 -> peak lr over `warmup_steps`) followed by cosine decay
+// down to `min_lr` over the rest of the run. `local_step`/`local_total` are
+// relative to the start of *this* invocation (not the checkpoint's absolute
+// step), so a resumed run gets its own fresh warmup rather than inheriting
+// wherever the old flat-lr schedule left off.
+static float lr_at_step(const Args& a, int local_step, int local_total) {
+    if (a.warmup_steps > 0 && local_step < a.warmup_steps) {
+        return a.lr * (float)(local_step + 1) / (float)a.warmup_steps;
+    }
+    int decay_steps = std::max(1, local_total - a.warmup_steps);
+    float progress = (float)(local_step - a.warmup_steps) / (float)decay_steps;
+    progress = std::min(std::max(progress, 0.0f), 1.0f);
+    constexpr float PI = 3.14159265358979323846f;
+    float cosine = 0.5f * (1.0f + std::cos(PI * progress));
+    return a.min_lr + (a.lr - a.min_lr) * cosine;
+}
+
 // Random contiguous windows for next-token prediction: x = ids[s : s+T],
 // y = ids[s+1 : s+T+1]. Targets whose predict-mask is false become IGNORE_INDEX
 // so the loss skips them (user/system turns in chat data). Mirrors train.py's
@@ -122,12 +159,16 @@ static void sample_batch(const Dataset& data, int batch_size, int seq_len,
                           std::mt19937& rng, std::vector<int>& x_host, std::vector<int>& y_host) {
     const std::vector<int>& ids = data.ids;
     const std::vector<char>& mask = data.mask;
-    int max_start = (int)ids.size() - seq_len - 1;  // start drawn from [0, max_start)
-    std::uniform_int_distribution<int> dist(0, max_start - 1);
+    // ids.size() can exceed INT32_MAX on a multi-GB corpus (e.g. ~4 billion
+    // tokens for the full KEVINDATA set), so the start offset needs a 64-bit
+    // type throughout - an `int` here would silently wrap and corrupt/crash
+    // batch sampling.
+    int64_t max_start = (int64_t)ids.size() - seq_len - 1;  // start drawn from [0, max_start)
+    std::uniform_int_distribution<int64_t> dist(0, max_start - 1);
     x_host.resize((size_t)batch_size * seq_len);
     y_host.resize((size_t)batch_size * seq_len);
     for (int b = 0; b < batch_size; ++b) {
-        int s = dist(rng);
+        int64_t s = dist(rng);
         for (int t = 0; t < seq_len; ++t) {
             x_host[(size_t)b * seq_len + t] = ids[s + t];
             int tgt = ids[s + t + 1];
@@ -175,7 +216,7 @@ int main(int argc, char** argv) {
                        ? load_chat_dataset(tokenizer, args.corpus)
                        : load_text_dataset(tokenizer, args.corpus, args.max_bytes);
 
-    if ((int)data.ids.size() <= args.seq_len + 1) {
+    if (data.ids.size() <= (size_t)(args.seq_len + 1)) {
         fprintf(stderr, "[error] corpus has only %zu tokens, need > seq_len+1 (%d)\n",
                 data.ids.size(), args.seq_len + 1);
         return EXIT_FAILURE;
@@ -185,14 +226,15 @@ int main(int argc, char** argv) {
            args.fp8 ? "on" : "off");
 
     g_fp8_enabled = args.fp8;
+    g_training = true;
 
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
 
     std::mt19937 rng((unsigned int)args.seed);
     TransformerModel model(vocab_size, args.d_model, args.num_heads, args.num_layers,
-                            args.d_ff, args.seq_len, rng);
-    CrossEntropyLoss loss_fn(/*ignore_index=*/IGNORE_INDEX);
+                            args.d_ff, args.seq_len, rng, args.dropout);
+    CrossEntropyLoss loss_fn(/*ignore_index=*/IGNORE_INDEX, args.label_smoothing);
 
     int start_step = 0;
     if (resuming) {
@@ -217,6 +259,9 @@ int main(int argc, char** argv) {
         metrics << "step,loss,perplexity,lr,tokens_per_sec,elapsed_sec\n";
 
     printf("Training for %d steps (starting at %d)...\n", args.steps, start_step);
+    printf("lr schedule: warmup %d steps -> peak %.2e, cosine decay to %.2e over %d steps; "
+           "grad_clip=%.2f label_smoothing=%.2f optimizer=AdamW\n",
+           args.warmup_steps, args.lr, args.min_lr, args.steps, args.grad_clip, args.label_smoothing);
 
     DeviceIntArray x_dev, y_dev;
     std::vector<int> x_host, y_host;
@@ -233,11 +278,16 @@ int main(int argc, char** argv) {
         x_dev.from_host(x_host);
         y_dev.from_host(y_host);
 
+        int local_step = step - start_step;
+        float cur_lr = lr_at_step(args, local_step, args.steps);
+        int adam_t = local_step + 1;  // Adam bias-correction step, 1-indexed
+
         float* logits = model.forward(handle, x_dev.data, args.batch_size, args.seq_len);
         loss = loss_fn.forward(logits, y_dev.data, rows, vocab_size);
         float* dlogits = loss_fn.backward();
         model.backward(handle, dlogits);
-        model.update(args.lr);
+        if (args.grad_clip > 0.0f) model.clip_grad_norm(args.grad_clip);
+        model.update(cur_lr, adam_t);
 
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t1 = std::chrono::steady_clock::now();
@@ -246,7 +296,7 @@ int main(int argc, char** argv) {
         double elapsed = std::chrono::duration<double>(t1 - t_start).count();
         double ppl = std::exp(std::min(loss, 20.0f));
 
-        metrics << step << ',' << loss << ',' << ppl << ',' << args.lr << ','
+        metrics << step << ',' << loss << ',' << ppl << ',' << cur_lr << ','
                 << tokens_per_sec << ',' << elapsed << '\n';
         metrics.flush();
 

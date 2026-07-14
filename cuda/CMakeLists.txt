@@ -27,6 +27,9 @@ set_target_properties(transformer_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_executable(train_transformer_cuda src/main.cu)
 target_link_libraries(train_transformer_cuda PRIVATE transformer_core)
 
+add_executable(probe src/probe.cu)
+target_link_libraries(probe PRIVATE transformer_core)
+
 # Link the bbpe tokenizer's C++ core (../tokenizer) so --tokenizer bbpe works.
 # It's a pure-C++, Python-free library, so we just compile its sources into a
 # static lib and link. Turn OFF to build with only the byte-level tokenizer.

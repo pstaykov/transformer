@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KEVIN — a transformer built from scratch</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="scroll-progress" id="scroll-progress"></div>
+
+<nav id="nav">
+  <a href="#chat-section">chat</a>
+  <a href="#architecture">architecture</a>
+  <a href="#scratch">from scratch</a>
+  <a href="#training">training</a>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="badge">no autograd · no pytorch · no huggingface</div>
+    <h1>KEVIN</h1>
+    <p class="tagline">
+      A decoder-only transformer with every gradient derived and coded by hand —
+      then implemented twice: once in NumPy, once in CUDA.
+    </p>
+
+    <div class="stats" id="stats">
+      <div class="stat" style="--i:0"><span class="stat-value" id="stat-params">—</span><span class="stat-label">parameters</span></div>
+      <div class="stat" style="--i:1"><span class="stat-value" id="stat-layers">—</span><span class="stat-label">layers</span></div>
+      <div class="stat" style="--i:2"><span class="stat-value" id="stat-heads">—</span><span class="stat-label">attention heads</span></div>
+      <div class="stat" style="--i:3"><span class="stat-value" id="stat-dmodel">—</span><span class="stat-label">d_model</span></div>
+      <div class="stat" style="--i:4"><span class="stat-value" id="stat-ctx">—</span><span class="stat-label">context</span></div>
+      <div class="stat" style="--i:5"><span class="stat-value" id="stat-step">—</span><span class="stat-label">trained steps</span></div>
+    </div>
+
+    <div class="load-state" id="load-state"></div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section id="chat-section">
+    <h2 class="reveal">Talk to it</h2>
+    <p class="lede reveal" style="--i:1">
+      Every token you see is one full forward pass through the network. There is no
+      KV cache — the model re-reads its entire context to produce each next token,
+      which is exactly why it arrives at the pace it does.
+    </p>
+
+    <div class="chat reveal" style="--i:2">
+      <div class="chat-log" id="chat-log">
+        <div class="empty-chat" id="empty-chat">Say something to KEVIN.</div>
+      </div>
+      <form class="chat-input" id="chat-form">
+        <input type="text" id="chat-text" autocomplete="off" placeholder="Ask KEVIN something…">
+        <button type="submit" id="chat-send">Send</button>
+      </form>
+      <div class="chat-meta" id="chat-meta"></div>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <h2 class="reveal">The architecture</h2>
+    <p class="lede reveal" style="--i:1">
+      A LLaMA-style pre-norm decoder stack: RMSNorm instead of LayerNorm, a SwiGLU
+      feed-forward network instead of a plain MLP, and learned positional embeddings.
+      Numbers below are read from the loaded checkpoint, not hardcoded.
+    </p>
+
+    <div class="arch">
+      <div class="arch-box io reveal">token ids <span class="dim" id="arch-in">(B, T)</span></div>
+      <div class="arch-arrow reveal" style="--d:0s"></div>
+
+      <div class="arch-box reveal">
+        <div class="arch-title">Embedding</div>
+        <div class="arch-sub">token embedding + <em>learned</em> positional embedding</div>
+        <div class="arch-shape" id="arch-emb">—</div>
+      </div>
+      <div class="arch-arrow reveal" style="--d:0.3s"></div>
+
+      <div class="arch-block reveal">
+        <div class="arch-block-label"><span id="arch-nlayers">—</span> × TransformerBlock</div>
+        <div class="arch-inner">
+          <div class="arch-box sub">RMSNorm</div>
+          <div class="arch-arrow small" style="--d:0.6s"></div>
+          <div class="arch-box sub attn">
+            <div class="arch-title">Multi-Head Attention</div>
+            <div class="arch-sub" id="arch-attn">—</div>
+            <div class="arch-note">causal mask · all heads in one batched matmul</div>
+          </div>
+          <div class="residual">＋ residual</div>
+          <div class="arch-arrow small" style="--d:0.9s"></div>
+          <div class="arch-box sub">RMSNorm</div>
+          <div class="arch-arrow small" style="--d:1.2s"></div>
+          <div class="arch-box sub mlp">
+            <div class="arch-title">SwiGLU MLP</div>
+            <div class="arch-sub" id="arch-mlp">—</div>
+            <div class="arch-note">Swish gate × value · β is a <em>learned</em> parameter</div>
+          </div>
+          <div class="residual">＋ residual</div>
+        </div>
+      </div>
+      <div class="arch-arrow reveal" style="--d:1.5s"></div>
+
+      <div class="arch-box reveal"><div class="arch-title">RMSNorm</div><div class="arch-sub">final norm</div></div>
+      <div class="arch-arrow reveal" style="--d:1.8s"></div>
+      <div class="arch-box reveal">
+        <div class="arch-title">Output projection</div>
+        <div class="arch-shape" id="arch-out">—</div>
+        <div class="arch-note">untied from the input embedding</div>
+      </div>
+      <div class="arch-arrow reveal" style="--d:2.1s"></div>
+      <div class="arch-box io reveal">logits <span class="dim" id="arch-logits">(B, T, vocab)</span></div>
+    </div>
+  </section>
+
+  <section id="scratch">
+    <h2 class="reveal">Built from scratch, three times over</h2>
+
+    <div class="cards">
+      <article class="card reveal" style="--i:0">
+        <div class="card-tag">the math</div>
+        <h3>Every backward pass, by hand</h3>
+        <p>
+          No autograd anywhere. The gradient of attention, RMSNorm, SwiGLU, softmax,
+          cross-entropy and the embedding scatter are each derived on paper and written
+          out as code.
+        </p>
+        <p>
+          The softmax backward never materializes the Jacobian — it uses the
+          <code>s ⊙ (g − Σ s·g)</code> identity so it stays batched. Cross-entropy
+          supports <code>ignore_index</code>, which is what makes SFT possible:
+          loss is computed on assistant turns only.
+        </p>
+      </article>
+
+      <article class="card reveal" style="--i:1">
+        <div class="card-tag">the gpu</div>
+        <h3>A CUDA engine, mirrored 1:1</h3>
+        <p>
+          A standalone C++17/CUDA trainer at full feature parity with the NumPy one —
+          same architecture, same init scales, same numerics, same checkpoints.
+        </p>
+        <p>
+          Roughly sixteen hand-written kernels — <code>k_rmsnorm_backward</code>,
+          <code>k_swiglu_backward</code>, <code>k_softmax_forward</code>,
+          <code>k_embedding_backward</code> and friends — with shared-memory block reductions
+          and atomic gradient accumulation. cuBLAS handles the matmuls; everything
+          around them is hand-rolled, including RAII device buffers that stop
+          reallocating once training reaches steady state.
+        </p>
+      </article>
+
+      <article class="card reveal" style="--i:2">
+        <div class="card-tag">the tokenizer</div>
+        <h3>Byte-level BPE, in C++</h3>
+        <p>
+          Not HuggingFace <code>tokenizers</code> — a from-scratch trainer and encoder.
+          Merge selection runs off a max-heap with an inverted pair→word index and lazy
+          deletion, so each merge only re-counts the words it actually touched.
+        </p>
+        <p>
+          256 byte tokens as the base vocabulary means zero OOV. Pretokenization is a
+          hand-written UTF-8 state machine reproducing the GPT-4 splitting rules,
+          right down to capping digit runs at three characters.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <section id="training">
+    <h2 class="reveal">Training</h2>
+    <p class="lede reveal" style="--i:1">
+      Loss and perplexity, straight from the <code>metrics.csv</code> the trainer writes
+      each step. Optimizer is plain SGD — hand-written, like everything else.
+    </p>
+
+    <div class="metrics-summary reveal" id="metrics-summary" style="--i:2"></div>
+    <div class="charts">
+      <figure class="chart reveal" style="--i:3">
+        <figcaption>Training loss</figcaption>
+        <canvas id="chart-loss" width="900" height="300"></canvas>
+      </figure>
+      <figure class="chart reveal" style="--i:4">
+        <figcaption>Perplexity <span class="dim">(log scale)</span></figcaption>
+        <canvas id="chart-ppl" width="900" height="300"></canvas>
+      </figure>
+    </div>
+    <div class="empty-state reveal" id="metrics-empty" hidden></div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span id="footer-meta">—</span>
+  </div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

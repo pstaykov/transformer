@@ -25,38 +25,11 @@ from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils import fp8
 from utils import chat as chat_utils
 from utils import notify as notify_utils
-
-try:
-    import bbpe_tokenizer
-    HAS_BBPE = True
-except ImportError:
-    HAS_BBPE = False
-
-
-class ByteTokenizer:
-    """Fallback tokenizer: every byte of UTF-8 text is its own token."""
-
-    vocab_size = 257  # 256 byte values + 1 pad id
-    pad_id = 256
-
-    def encode(self, text):
-        return list(text.encode("utf-8"))
-
-    def decode(self, ids):
-        return bytes(b for b in ids if b < 256).decode("utf-8", errors="replace")
+from utils.tokenizer import load_tokenizer
 
 
 def get_tokenizer(args):
-    if args.tokenizer == "bbpe":
-        if not HAS_BBPE:
-            raise RuntimeError(
-                "bbpe_tokenizer is not importable in this environment; "
-                "run with the tokenizer/venv interpreter, or pass --tokenizer byte."
-            )
-        tok = bbpe_tokenizer.Tokenizer.load_binary(args.tokenizer_path)
-        return tok, args.vocab_size
-    tok = ByteTokenizer()
-    return tok, tok.vocab_size
+    return load_tokenizer(args.tokenizer, args.tokenizer_path, args.vocab_size)
 
 
 def load_corpus_ids(tokenizer, corpus_path):

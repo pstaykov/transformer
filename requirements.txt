@@ -1,0 +1,14 @@
+# Core: the model itself is pure numpy, with numba JIT-compiling the FP8 kernel.
+numpy
+numba
+
+# Training progress emails (utils/notify.py renders the loss curve as a PNG).
+matplotlib
+
+# Showcase site + chat (serve.py).
+fastapi
+uvicorn
+
+# The bbpe tokenizer is a C++ extension and is NOT installed from here - build it
+# with tokenizer/build_py_client.sh. Without it, everything falls back to the
+# byte-level tokenizer in utils/tokenizer.py.

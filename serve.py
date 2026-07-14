@@ -21,13 +21,14 @@ import argparse
 import csv
 import json
 import os
+import threading
 import time
 
 import numpy as np
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from utils import fp8
 
@@ -62,6 +63,134 @@ STATE = {
     "metrics_path": "metrics.csv",
 }
 
+# Transformer.forward() (model.py) stashes intermediate activations on `self`
+# (e.g. self._ln_f_out, self._W_out_q), and the per-layer blocks do the same
+# internally. There is no KV cache, so a full generation is many forward()
+# calls in a row. FastAPI runs sync endpoints (like api_chat's `events()`
+# generator) in a threadpool, so two simultaneous POST /api/chat requests
+# would otherwise call forward() on the *same* Transformer instance from two
+# threads at once and clobber each other's activations mid-generation,
+# producing garbled logits/output (not just a race on paper - it's an actual
+# shared mutable attribute). GENERATION_LOCK serializes generation so
+# concurrent requests queue instead of interleaving.
+GENERATION_LOCK = threading.Lock()
+
+# Bound how many requests may be queued (waiting on GENERATION_LOCK or already
+# generating) at once. Without this, N idle browser tabs (or one script firing
+# many requests) can each spawn a threadpool worker that blocks forever on the
+# lock, exhausting the pool and making the server unresponsive to everyone.
+# Generation is fully serialized above, so "concurrent" generation is really
+# just queue depth; 4 is enough slack for a couple of LAN users without
+# letting the queue grow unbounded.
+MAX_QUEUED_REQUESTS = 4
+_queue_count = 0
+_queue_count_lock = threading.Lock()
+
+# Input clamps: a client (or a bug in the UI) can send arbitrary values. These
+# are sized off the model's actual context window (max_len, 256 tokens on
+# every checkpoint this project has trained) rather than picked arbitrarily -
+# KEVIN re-reads its *entire* context on every token (no KV cache), so
+# anything beyond max_len is silently truncated by generate_stream anyway.
+# Accepting more than that just wastes an LAN client's/attacker's request for
+# nothing, so the caps track the real budget instead of an arbitrary "big
+# enough" number.
+def _context_len():
+    cfg = STATE.get("config")
+    return cfg["max_len"] if cfg else 256
+
+
+def _max_new_tokens_cap():
+    return max(16, _context_len() // 2)  # leave half the window for the prompt
+
+
+MAX_MESSAGES = 8           # a long back-and-forth won't fit in 256 tokens anyway
+MAX_MESSAGE_CHARS = 240    # ~roughly 256 tokens' worth of BPE text, generously
+
+# ---------------------------------------------------------------------------
+# Zero-trust network layer: every request is treated as untrusted, including
+# ones from inside the LAN - a rate-limited or banned IP is rejected the same
+# way whether it's a stranger who found the port or a misbehaving device on
+# the same network. This is on top of, not instead of, the input clamps above
+# and the generation lock/queue cap - defense in depth.
+# ---------------------------------------------------------------------------
+
+_SECURITY_LOCK = threading.Lock()
+_request_log = {}   # ip -> sorted list of recent request timestamps (all routes)
+_chat_log = {}       # ip -> same, but only for POST /api/chat (the expensive route)
+_violations = {}     # ip -> count of rate-limit/oversize-body violations
+_banned_until = {}   # ip -> unix timestamp its ban expires
+
+RATE_LIMIT_WINDOW_SEC = 60
+RATE_LIMIT_MAX_GENERAL = 60   # page loads + polling /api/model, /api/metrics
+RATE_LIMIT_MAX_CHAT = 8       # generation is expensive; keep this tight
+MAX_BODY_BYTES = 16 * 1024    # a legitimate chat request is a few KB at most
+VIOLATIONS_BEFORE_BAN = 5
+BAN_DURATION_SEC = 15 * 60
+_IP_TRACKING_CAP = 2000       # prune stale IPs past this so uptime can't leak memory
+
+
+def _prune_window(log, now):
+    cutoff = now - RATE_LIMIT_WINDOW_SEC
+    while log and log[0] < cutoff:
+        log.pop(0)
+
+
+def _record_violation(ip, now):
+    count = _violations.get(ip, 0) + 1
+    _violations[ip] = count
+    if count >= VIOLATIONS_BEFORE_BAN:
+        _banned_until[ip] = now + BAN_DURATION_SEC
+        print(f"[serve] banning {ip} for {BAN_DURATION_SEC}s after {count} violations")
+
+
+def _prune_stale_ips(now):
+    if len(_request_log) + len(_chat_log) <= _IP_TRACKING_CAP:
+        return
+    stale_cutoff = now - RATE_LIMIT_WINDOW_SEC * 10
+    for log in (_request_log, _chat_log):
+        for ip in [ip for ip, ts in log.items() if not ts or ts[-1] < stale_cutoff]:
+            del log[ip]
+
+
+@app.middleware("http")
+async def zero_trust_gate(request: Request, call_next):
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+
+    with _SECURITY_LOCK:
+        ban_until = _banned_until.get(ip)
+        if ban_until is not None:
+            if now < ban_until:
+                return JSONResponse(
+                    {"error": f"banned for {int(ban_until - now)}s after repeated abuse"},
+                    status_code=403,
+                )
+            del _banned_until[ip]  # ban expired: clean slate
+            _violations.pop(ip, None)
+
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > MAX_BODY_BYTES:
+            _record_violation(ip, now)
+            return JSONResponse({"error": "request body too large"}, status_code=413)
+
+        is_chat = request.url.path == "/api/chat"
+        log = _chat_log.setdefault(ip, []) if is_chat else _request_log.setdefault(ip, [])
+        limit = RATE_LIMIT_MAX_CHAT if is_chat else RATE_LIMIT_MAX_GENERAL
+        _prune_window(log, now)
+
+        if len(log) >= limit:
+            _record_violation(ip, now)
+            return JSONResponse(
+                {"error": "rate limit exceeded, slow down"},
+                status_code=429,
+                headers={"Retry-After": str(RATE_LIMIT_WINDOW_SEC)},
+            )
+
+        log.append(now)
+        _prune_stale_ips(now)
+
+    return await call_next(request)
+
 
 class ChatRequest(BaseModel):
     messages: list[dict]
@@ -71,6 +200,42 @@ class ChatRequest(BaseModel):
     top_p: float = 0.95
     system: str | None = None
     seed: int | None = None
+
+    @field_validator("messages")
+    @classmethod
+    def _clamp_messages(cls, v):
+        if len(v) > MAX_MESSAGES:
+            v = v[-MAX_MESSAGES:]
+        for m in v:
+            if not isinstance(m, dict) or "role" not in m or "content" not in m:
+                raise ValueError("each message needs a 'role' and 'content'")
+            m["content"] = str(m["content"])[:MAX_MESSAGE_CHARS]
+        return v
+
+    @field_validator("max_new_tokens")
+    @classmethod
+    def _clamp_max_new_tokens(cls, v):
+        return max(1, min(int(v), _max_new_tokens_cap()))
+
+    @field_validator("temperature")
+    @classmethod
+    def _clamp_temperature(cls, v):
+        return max(0.0, min(float(v), 5.0))
+
+    @field_validator("top_k")
+    @classmethod
+    def _clamp_top_k(cls, v):
+        return max(0, min(int(v), 1000))
+
+    @field_validator("top_p")
+    @classmethod
+    def _clamp_top_p(cls, v):
+        return max(0.0, min(float(v), 1.0))
+
+    @field_validator("system")
+    @classmethod
+    def _clamp_system(cls, v):
+        return v[:MAX_MESSAGE_CHARS] if v else v
 
 
 def load_model(ckpt_path, tokenizer_kind, tokenizer_path, num_heads, vocab_size):
@@ -184,35 +349,54 @@ def api_chat(req: ChatRequest):
     """Stream a completion as SSE. Each event is {"token": "..."} or {"done": ...}."""
 
     def events():
+        global _queue_count
+
         if STATE["model"] is None:
             payload = {"error": STATE["error"] or "no model loaded"}
             yield f"data: {json.dumps(payload)}\n\n"
             return
 
-        model, tokenizer = STATE["model"], STATE["tokenizer"]
-        prompt = render_chat_prompt(req.messages, system=req.system)
+        # Reserve a queue slot up front so a burst of requests can't all pile
+        # up waiting on GENERATION_LOCK; reject past MAX_QUEUED_REQUESTS with
+        # a clear error instead of leaving the client's connection hanging.
+        with _queue_count_lock:
+            if _queue_count >= MAX_QUEUED_REQUESTS:
+                yield f"data: {json.dumps({'error': 'server busy, try again'})}\n\n"
+                return
+            _queue_count += 1
 
-        n, t0 = 0, time.time()
         try:
-            for delta in generate_stream(
-                model, tokenizer, prompt,
-                max_new_tokens=req.max_new_tokens,
-                temperature=req.temperature,
-                top_k=req.top_k,
-                top_p=req.top_p,
-                max_len=STATE["config"]["max_len"],
-                seed=req.seed,
-            ):
-                n += 1
-                yield f"data: {json.dumps({'token': delta})}\n\n"
-        except Exception as e:  # surface generation failures in the UI, don't hang the stream
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-            return
+            model, tokenizer = STATE["model"], STATE["tokenizer"]
+            n, t0 = 0, time.time()
+            try:
+                with GENERATION_LOCK:
+                    prompt = render_chat_prompt(req.messages, system=req.system)
+                    for delta in generate_stream(
+                        model, tokenizer, prompt,
+                        max_new_tokens=req.max_new_tokens,
+                        temperature=req.temperature,
+                        top_k=req.top_k,
+                        top_p=req.top_p,
+                        max_len=STATE["config"]["max_len"],
+                        seed=req.seed,
+                    ):
+                        n += 1
+                        yield f"data: {json.dumps({'token': delta})}\n\n"
+            except Exception as e:
+                # Catches failures anywhere in this block - bad prompt data,
+                # tokenizer errors, OOM, etc. - not just ones raised inside
+                # generate_stream, so a single bad request can't take the
+                # server process down.
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                return
 
-        elapsed = time.time() - t0
-        rate = n / elapsed if elapsed > 0 else 0.0
-        STATE["tokens_per_sec"] = rate
-        yield f"data: {json.dumps({'done': True, 'tokens': n, 'elapsed': elapsed, 'tokens_per_sec': rate})}\n\n"
+            elapsed = time.time() - t0
+            rate = n / elapsed if elapsed > 0 else 0.0
+            STATE["tokens_per_sec"] = rate
+            yield f"data: {json.dumps({'done': True, 'tokens': n, 'elapsed': elapsed, 'tokens_per_sec': rate})}\n\n"
+        finally:
+            with _queue_count_lock:
+                _queue_count -= 1
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

@@ -1,0 +1,205 @@
+"""Generate the next token(s) from the from-scratch transformer.
+
+No inference path existed in this repo before (train.py/model.py only do
+forward+backward for training). This does a single forward pass, takes the
+logits at the last position, and samples one token at a time.
+
+Usage:
+    python generate.py --prompt "Hello" --resume checkpoints/latest.npz
+    python generate.py --prompt "Hello"   # random-init weights if no --resume
+"""
+
+import argparse
+import struct
+
+import numpy as np
+
+from model import Transformer
+from utils.checkpoint import load_checkpoint, unflatten
+from utils.tokenizer import ByteTokenizer, load_tokenizer  # noqa: F401 (byte tokenizer fallback)
+
+
+def softmax(x):
+    x = x - x.max(axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=-1, keepdims=True)
+
+
+# Maps a CUDA checkpoint param name to the model.py params()/load_params()
+# dict path, and the (rows, cols) shape to reshape its flat data into
+# (vectors/scalars are left flat, shape=None). "<i>" is substituted with the
+# block index.
+_CUDA_NAME_MAP = {
+    "embedding.token_emb": ("embedding.token_emb", lambda d: (d["vocab_size"], d["d_model"])),
+    "embedding.pos_emb": ("embedding.pos_emb", lambda d: (d["max_len"], d["d_model"])),
+    "blocks.<i>.ln1.gamma": ("blocks.<i>.ln1.gamma", None),
+    "blocks.<i>.ln2.gamma": ("blocks.<i>.ln2.gamma", None),
+    "blocks.<i>.attn.Wq.W": ("blocks.<i>.attn.Wq", lambda d: (d["d_model"], d["d_model"])),
+    "blocks.<i>.attn.Wk.W": ("blocks.<i>.attn.Wk", lambda d: (d["d_model"], d["d_model"])),
+    "blocks.<i>.attn.Wv.W": ("blocks.<i>.attn.Wv", lambda d: (d["d_model"], d["d_model"])),
+    "blocks.<i>.attn.Wo.W": ("blocks.<i>.attn.Wo", lambda d: (d["d_model"], d["d_model"])),
+    "blocks.<i>.mlp.hidden.W": ("blocks.<i>.mlp.hidden_layer.W", lambda d: (d["d_model"], 2 * d["d_ff"])),
+    "blocks.<i>.mlp.hidden.b": ("blocks.<i>.mlp.hidden_layer.b", None),
+    "blocks.<i>.mlp.swiglu.beta": ("blocks.<i>.mlp.swiglu.beta", None),
+    "blocks.<i>.mlp.output.W": ("blocks.<i>.mlp.output_layer.W", lambda d: (d["d_ff"], d["d_model"])),
+    "blocks.<i>.mlp.output.b": ("blocks.<i>.mlp.output_layer.b", None),
+    "ln_f.gamma": ("ln_f.gamma", None),
+    "W_out.W": ("W_out", lambda d: (d["d_model"], d["vocab_size"])),
+}
+
+
+def load_cuda_checkpoint(path, model):
+    """Load a CUDA trainer .ckpt (see cuda/include/checkpoint.cuh) into a
+    numpy Transformer in-place. Shapes match 1:1 (Linear.W is (in, out)
+    row-major on both sides), only the on-disk container format differs from
+    utils.checkpoint's .npz. Returns the saved step.
+    """
+    with open(path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TFCKPT1\n":
+            raise ValueError(f"{path}: bad magic {magic!r}, not a TFCKPT1 checkpoint")
+
+        step, vocab_size, d_model, num_heads, num_layers, d_ff, max_len = struct.unpack(
+            "<7i", f.read(28)
+        )
+        dims = dict(vocab_size=vocab_size, d_model=d_model, d_ff=d_ff, max_len=max_len)
+        expected = (
+            model.vocab_size,
+            model.embedding.token_emb.shape[1],
+            model.blocks[0].attn.num_heads,
+            len(model.blocks),
+            model.blocks[0].mlp.hidden_layer.W.shape[1] // 2,
+            model.embedding.pos_emb.shape[0],
+        )
+        if (vocab_size, d_model, num_heads, num_layers, d_ff, max_len) != expected:
+            raise ValueError(
+                f"{path}: architecture mismatch - checkpoint has vocab={vocab_size} "
+                f"d_model={d_model} heads={num_heads} layers={num_layers} d_ff={d_ff} "
+                f"max_len={max_len}; pass matching --vocab-size/--d-model/--num-heads/"
+                f"--num-layers/--d-ff/--max-len flags"
+            )
+
+        (num_params,) = struct.unpack("<i", f.read(4))
+        raw = {}
+        for _ in range(num_params):
+            (name_len,) = struct.unpack("<i", f.read(4))
+            name = f.read(name_len).decode("utf-8")
+            (size,) = struct.unpack("<q", f.read(8))
+            raw[name] = np.frombuffer(f.read(size * 4), dtype="<f4").copy()
+
+    flat = {}
+    for cuda_name, data in raw.items():
+        block_idx = None
+        lookup_name = cuda_name
+        if cuda_name.startswith("blocks."):
+            block_idx, rest = cuda_name.split(".", 2)[1:]
+            lookup_name = f"blocks.<i>.{rest}"
+
+        model_name, shape_fn = _CUDA_NAME_MAP[lookup_name]
+        if block_idx is not None:
+            model_name = model_name.replace("<i>", block_idx)
+        if shape_fn is not None:
+            data = data.reshape(shape_fn(dims))
+        elif cuda_name.endswith("swiglu.beta"):
+            data = float(data[0])
+        flat[model_name] = data
+
+    model.load_params(unflatten(flat))
+    return step
+
+
+def read_cuda_checkpoint_header(path):
+    """Peek a .ckpt's architecture without loading the parameter blobs, so
+    the model can be sized to match before load_cuda_checkpoint runs."""
+    with open(path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TFCKPT1\n":
+            raise ValueError(f"{path}: bad magic {magic!r}, not a TFCKPT1 checkpoint")
+        step, vocab_size, d_model, num_heads, num_layers, d_ff, max_len = struct.unpack(
+            "<7i", f.read(28)
+        )
+    return dict(
+        step=step, vocab_size=vocab_size, d_model=d_model, num_heads=num_heads,
+        num_layers=num_layers, d_ff=d_ff, max_len=max_len,
+    )
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--prompt", default="Hello, transformer!")
+    p.add_argument("--tokenizer", choices=["bbpe", "byte"], default="byte")
+    p.add_argument("--tokenizer-path", default="tokenizer/tok_out/tokenizer.bbpe")
+    p.add_argument("--vocab-size", type=int, default=32000)
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--num-heads", type=int, default=8)
+    p.add_argument("--num-layers", type=int, default=4)
+    p.add_argument("--d-ff", type=int, default=256)
+    p.add_argument("--max-len", type=int, default=256)
+    p.add_argument("--resume", default=None,
+                    help="path to a checkpoint: .npz (NumPy trainer) or .ckpt (CUDA trainer)")
+    p.add_argument("--num-tokens", type=int, default=1, help="how many tokens to generate")
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=0)
+    args = p.parse_args()
+
+    rng = np.random.default_rng(args.seed)
+
+    is_cuda_ckpt = bool(args.resume) and args.resume.endswith(".ckpt")
+    if is_cuda_ckpt:
+        # A CUDA checkpoint carries its own architecture + vocab size (bbpe,
+        # since the byte tokenizer's 257-token vocab wouldn't match a
+        # 32005-entry checkpoint) - use those instead of the CLI defaults.
+        hdr = read_cuda_checkpoint_header(args.resume)
+        args.vocab_size = hdr["vocab_size"]
+        args.d_model = hdr["d_model"]
+        args.num_heads = hdr["num_heads"]
+        args.num_layers = hdr["num_layers"]
+        args.d_ff = hdr["d_ff"]
+        args.max_len = hdr["max_len"]
+        if args.tokenizer == "byte":
+            args.tokenizer = "bbpe"
+
+    tok, vocab_size = load_tokenizer(args.tokenizer, args.tokenizer_path, args.vocab_size)
+
+    model = Transformer(
+        vocab_size,
+        d_model=args.d_model,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        d_ff=args.d_ff,
+        max_len=args.max_len,
+    )
+
+    if is_cuda_ckpt:
+        step = load_cuda_checkpoint(args.resume, model)
+        print(f"loaded CUDA checkpoint from {args.resume} (step {step}, "
+              f"d_model={args.d_model} layers={args.num_layers} heads={args.num_heads} "
+              f"d_ff={args.d_ff} vocab={args.vocab_size})")
+    elif args.resume:
+        step, _ = load_checkpoint(args.resume, model)
+        print(f"loaded checkpoint from {args.resume} (step {step})")
+    else:
+        print("no --resume given: using random-init weights (untrained)")
+
+    ids = tok.encode(args.prompt)
+    print(f"prompt         : {args.prompt!r}")
+    print(f"prompt token ids: {ids}")
+
+    for _ in range(args.num_tokens):
+        token_ids = np.array([ids])
+        logits = model.forward(token_ids)  # (1, T, vocab_size)
+        next_logits = logits[0, -1] / args.temperature
+        probs = softmax(next_logits)
+        next_id = int(rng.choice(len(probs), p=probs))
+        top5 = np.argsort(-probs)[:5]
+        print(f"\n-> next-token probs (top 5): "
+              f"{[(int(i), round(float(probs[i]), 4)) for i in top5]}")
+        print(f"-> sampled token id: {next_id} -> {tok.decode([next_id])!r}")
+        ids.append(next_id)
+
+    print(f"\nfull sequence ids: {ids}")
+    print(f"decoded          : {tok.decode(ids)!r}")
+
+
+if __name__ == "__main__":
+    main()

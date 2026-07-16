@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Babysits the sft_wildchat training run: checks periodically that the
+# Babysits the sft_everyday training run: checks periodically that the
 # trainer process is still alive, and if it has died, inspects the tail of
 # its log to figure out why and restarts it - halving --batch-size on an
 # out-of-memory death (down to a floor), otherwise just resuming as-is.
@@ -8,7 +8,7 @@ set -u
 cd "$(dirname "$0")"
 source ../.venv/bin/activate
 
-RUN_DIR=checkpoints/sft_wildchat
+RUN_DIR=checkpoints/sft_everyday
 PIDFILE=$RUN_DIR/train.pid
 LOGFILE=$RUN_DIR/train.log
 MONITOR_LOG=$RUN_DIR/monitor.log
@@ -52,11 +52,11 @@ restart_training() {
 
   nohup ./build/train_transformer_cuda \
     --resume $RUN_DIR/latest.ckpt \
-    --corpus ../data/wildchat_en.jsonl --data-format chat \
+    --corpus ../data/everyday_conversations.jsonl --data-format chat \
     --tokenizer bbpe --tokenizer-path ../tokenizer/tok_out_kevindata/tokenizer.bbpe \
-    --batch-size "$batch" --lr 5e-5 --min-lr 5e-6 --steps 196000 --warmup-steps 500 \
+    --batch-size "$batch" --lr 5e-5 --min-lr 5e-6 --steps 3000 --warmup-steps 100 \
     --grad-clip 1.0 --label-smoothing 0.05 --dropout 0.1 \
-    --log-every 50 --checkpoint-every 10000 \
+    --log-every 50 --checkpoint-every 500 \
     --checkpoint-dir $RUN_DIR --metrics-path $RUN_DIR/metrics.csv \
     >> "$LOGFILE" 2>&1 < /dev/null &
   disown

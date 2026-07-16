@@ -142,6 +142,13 @@ simulated FP8 (E4M3) matmul path (matches `train.py`'s numerics, a bit slower).
 
 ---
 
+## Datasets
+
+- **Pretraining corpus**: [`HuggingFaceFW/fineweb`](https://huggingface.co/datasets/HuggingFaceFW/fineweb)
+- **SFT (chat fine-tuning) corpus**: [`HuggingFaceTB/everyday-conversations-llama3.1-2k`](https://huggingface.co/datasets/HuggingFaceTB/everyday-conversations-llama3.1-2k)
+
+---
+
 ## Data formats
 
 **Plain text** (`--data-format text`, the default): the whole file is one token

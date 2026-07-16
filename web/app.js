@@ -29,6 +29,7 @@ const I18N = {
       chatSend: "Senden",
       continueReply: "Weiterschreiben",
       clear: "Neu anfangen",
+      ttsToggle: "Antworten vorlesen",
       disabledPlaceholder: "Kein Modell geladen, Fortsetzung deaktiviert",
       disabledEmpty: "Lade ein Modell, um weiterzuschreiben.",
       chatDisabledPlaceholder: "Kein Chat-Modell geladen",
@@ -160,6 +161,7 @@ const I18N = {
       chatSend: "Send",
       continueReply: "Continue",
       clear: "Start over",
+      ttsToggle: "read replies aloud",
       disabledPlaceholder: "No model loaded, continuation disabled",
       disabledEmpty: "Load a model to keep writing.",
       chatDisabledPlaceholder: "No chat model loaded",
@@ -802,6 +804,7 @@ function resetChatSession() {
   streamAbort?.abort();
   streamAbort = null;
   streaming = false;
+  if (TTS_SUPPORTED) speechSynthesis.cancel();
   docText = "";
   docBubble = null;
   chatMessages = [];
@@ -866,10 +869,12 @@ async function streamCompletion(body, { onToken, onDone }) {
 
 /** Drives one full generation into `replyBubble`, starting from
  * `initialText` (empty for a fresh reply, the reply-so-far for "Continue").
- * `onFinish(finalText)` is called once the stream completes, so the caller
- * can file the result away (push a new assistant message, or extend the
- * last one). Shared by the send and continue handlers below - they only
- * differ in what `body` asks the server for and what onFinish does. */
+ * `onFinish(finalText, newText)` is called once the stream completes, so the
+ * caller can file the result away (push a new assistant message, or extend
+ * the last one) - `newText` is just the slice generated this call, handy for
+ * TTS so "Continue" doesn't re-read what was already spoken. Shared by the
+ * send and continue handlers below - they only differ in what `body` asks
+ * the server for and what onFinish does. */
 async function runGeneration(body, replyBubble, initialText, onFinish) {
   let replyText = initialText;
 
@@ -898,7 +903,7 @@ async function runGeneration(body, replyBubble, initialText, onFinish) {
         $("chat-log").scrollTop = $("chat-log").scrollHeight;
       },
       onDone: (evt) => {
-        onFinish(replyText);
+        onFinish(replyText, replyText.slice(initialText.length));
         $("chat-meta").textContent =
           t("chat.done")(evt.tokens, evt.elapsed.toFixed(1), evt.tokens_per_sec.toFixed(1));
       },
@@ -929,8 +934,9 @@ $("chat-form").addEventListener("submit", async (e) => {
 
     lastAssistantBubble = addMessage("assistant");
     const body = { messages: chatMessages, mode: "chat", raw: false, max_new_tokens: MAX_NEW_TOKENS };
-    await runGeneration(body, lastAssistantBubble, "", (finalText) => {
+    await runGeneration(body, lastAssistantBubble, "", (finalText, newText) => {
       chatMessages.push({ role: "assistant", content: finalText });
+      speak(newText);
     });
   } else {
     if (!typed && !docText) return;
@@ -942,7 +948,7 @@ $("chat-form").addEventListener("submit", async (e) => {
     docBubble.textContent = docText;
 
     const body = { messages: [{ role: "user", content: docText }], mode: "autocomplete", raw: true, max_new_tokens: MAX_NEW_TOKENS };
-    await runGeneration(body, docBubble, docText, () => {});
+    await runGeneration(body, docBubble, docText, (finalText, newText) => speak(newText));
   }
 });
 
@@ -959,10 +965,54 @@ $("chat-continue").addEventListener("click", async () => {
     messages: chatMessages, mode: "chat", raw: false,
     continue_reply: true, max_new_tokens: MAX_NEW_TOKENS,
   };
-  await runGeneration(body, lastAssistantBubble, chatMessages[idx].content, (finalText) => {
+  await runGeneration(body, lastAssistantBubble, chatMessages[idx].content, (finalText, newText) => {
     chatMessages[idx].content = finalText;
+    speak(newText);
   });
 });
+
+/* ---------------- text-to-speech ----------------
+ * Reads finished KEVIN replies aloud via the browser's built-in speech
+ * synthesis - no server involvement, so it works the same whether the
+ * chat hits the base model or the finetuned one. Off by default and
+ * remembered across visits; hidden entirely on browsers without the API. */
+
+const TTS_SUPPORTED = "speechSynthesis" in window;
+let ttsEnabled = TTS_SUPPORTED && localStorage.getItem("kevin-tts") === "1";
+let ttsVoice = null;
+
+function pickTtsVoice() {
+  const voices = speechSynthesis.getVoices();
+  ttsVoice = voices.find((v) => v.lang === "en-US")
+    || voices.find((v) => v.lang?.startsWith("en"))
+    || voices[0]
+    || null;
+}
+
+if (TTS_SUPPORTED) {
+  pickTtsVoice();
+  speechSynthesis.addEventListener("voiceschanged", pickTtsVoice);
+
+  const ttsToggle = $("tts-toggle");
+  ttsToggle.hidden = false;
+  ttsToggle.setAttribute("aria-pressed", String(ttsEnabled));
+  ttsToggle.addEventListener("click", () => {
+    ttsEnabled = !ttsEnabled;
+    localStorage.setItem("kevin-tts", ttsEnabled ? "1" : "0");
+    ttsToggle.setAttribute("aria-pressed", String(ttsEnabled));
+    if (!ttsEnabled) speechSynthesis.cancel();
+  });
+}
+
+/** Speaks `text` (a finished reply, or just the newly-generated slice of
+ * one) if the toggle is on. No-op when TTS is unsupported/disabled/empty. */
+function speak(text) {
+  if (!TTS_SUPPORTED || !ttsEnabled || !text || !text.trim()) return;
+  const utter = new SpeechSynthesisUtterance(text);
+  if (ttsVoice) utter.voice = ttsVoice;
+  utter.lang = ttsVoice?.lang || "en-US";
+  speechSynthesis.speak(utter);
+}
 
 /* ---------------- paper peek modal ---------------- */
 

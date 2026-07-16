@@ -12,3 +12,7 @@ uvicorn
 # The bbpe tokenizer is a C++ extension and is NOT installed from here - build it
 # with tokenizer/build_py_client.sh. Without it, everything falls back to the
 # byte-level tokenizer in utils/tokenizer.py.
+
+# Downloading pretrained checkpoints/tokenizer from Hugging Face (setup.sh /
+# download_models.py).
+huggingface_hub

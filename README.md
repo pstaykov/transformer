@@ -17,6 +17,48 @@ conversation-format (SFT) data with a byte-level or a real byte-pair-encoding
 
 ---
 
+## Getting started (the fast path)
+
+Pretrained checkpoints (base + chat-tuned) and the matching tokenizer are
+published on Hugging Face — [`kevinindustries/kevin-k2`](https://huggingface.co/kevinindustries/kevin-k2)
+(base model + tokenizer) and [`kevinindustries/kevin-chat`](https://huggingface.co/kevinindustries/kevin-chat)
+(SFT chat model). Setup downloads them for you, so there's no need to train
+from scratch just to try the model out.
+
+**1. Run setup once** — creates a venv, installs Python deps, builds the bbpe
+tokenizer extension, and downloads the checkpoints/tokenizer into
+`cuda/checkpoints/` and `tokenizer/tok_out_kevindata/`:
+
+```bash
+./setup.sh
+```
+
+(Want Docker instead of a local venv? Run `./setup-docker.sh` — it builds the
+train/inference images and does the same Hugging Face download. Requires
+Docker; the training image also needs an NVIDIA GPU + the NVIDIA Container
+Toolkit, which the script installs if missing.)
+
+**2. Then just run one of these:**
+
+| Goal | Without Docker | With Docker |
+| --- | --- | --- |
+| Resume training the base model (needs an NVIDIA GPU + CUDA Toolkit locally) | `./train.sh` | `./train-docker.sh` |
+| Start the showcase site + chat server at `http://localhost:8000` (CPU, no GPU needed) | `./infer.sh` | `./infer-docker.sh` |
+
+`train.sh` defaults to resuming on the bundled tiny sample corpus, just to
+prove everything works end to end; point it at a real corpus with
+`CORPUS=path/to/corpus.txt ./train.sh` (see the script's header comment for
+the flags used for the real ~10GB run). Both scripts read every setting from
+environment variables with sensible defaults, and pass any extra CLI args
+straight through to the underlying trainer/server — e.g. `./train.sh --lr
+1e-4 --steps 5000`.
+
+Everything below this section explains what's happening under the hood, in
+case you want to train your own model from scratch instead of using the
+pretrained one.
+
+---
+
 ## Repository layout
 
 ```

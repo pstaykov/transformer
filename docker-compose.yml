@@ -1,0 +1,90 @@
+services:
+  train:
+    build:
+      context: .
+      dockerfile: docker/train.Dockerfile
+    image: transformer-train:latest
+    working_dir: /app/cuda
+    volumes:
+      - ./data:/app/data:ro
+      - ./KEVINDATA:/app/KEVINDATA:ro
+      - ./cuda/checkpoints:/app/cuda/checkpoints
+      - ./tokenizer/tok_out:/app/tokenizer/tok_out:ro
+      - ./tokenizer/tok_out_kevindata:/app/tokenizer/tok_out_kevindata:ro
+      - cuda_build:/app/cuda/build
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+    # Resumes the real run (run3, step ~313k) with the same hyperparameters
+    # it was already training with. Override this command for a different run.
+    command:
+      - --resume
+      - checkpoints/run3/latest.ckpt
+      - --corpus
+      - /app/KEVINDATA/mein_trainingsdaten_10gb.txt
+      - --tokenizer
+      - bbpe
+      - --tokenizer-path
+      - /app/tokenizer/tok_out_kevindata/tokenizer.bbpe
+      - --batch-size
+      - "16"
+      - --steps
+      - "300000"
+      - --lr
+      - "1e-4"
+      - --min-lr
+      - "1e-5"
+      - --warmup-steps
+      - "500"
+      - --grad-clip
+      - "1.0"
+      - --label-smoothing
+      - "0.05"
+      - --dropout
+      - "0.1"
+      - --log-every
+      - "50"
+      - --checkpoint-every
+      - "2000"
+      - --checkpoint-dir
+      - checkpoints/run3
+      - --metrics-path
+      - checkpoints/run3/metrics.csv
+
+  inference:
+    build:
+      context: .
+      dockerfile: docker/inference.Dockerfile
+    image: transformer-inference:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./cuda/checkpoints:/app/cuda/checkpoints:ro
+      - ./tokenizer/tok_out:/app/tokenizer/tok_out:ro
+      - ./tokenizer/tok_out_kevindata:/app/tokenizer/tok_out_kevindata:ro
+    command:
+      - --ckpt
+      - /app/cuda/checkpoints/run3/latest.ckpt
+      - --tokenizer
+      - bbpe
+      - --tokenizer-path
+      - /app/tokenizer/tok_out_kevindata/tokenizer.bbpe
+      - --vocab-size
+      - "32005"
+      - --metrics-path
+      - /app/cuda/checkpoints/run3/metrics.csv
+      - --chat-ckpt
+      - /app/cuda/checkpoints/sft_wildchat/latest.ckpt
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+
+volumes:
+  cuda_build:

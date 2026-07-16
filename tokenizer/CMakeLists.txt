@@ -36,3 +36,6 @@ add_executable(test_tokenizer tools/test_tokenizer.cpp)
 target_link_libraries(test_tokenizer PRIVATE bbpe_core)
 add_executable(encode_cli tools/encode_cli.cpp)
 target_link_libraries(encode_cli PRIVATE bbpe_core)
+
+add_executable(remap_specials tools/remap_specials.cpp)
+target_link_libraries(remap_specials PRIVATE bbpe_core)

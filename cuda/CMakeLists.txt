@@ -30,6 +30,9 @@ target_link_libraries(train_transformer_cuda PRIVATE transformer_core)
 add_executable(probe src/probe.cu)
 target_link_libraries(probe PRIVATE transformer_core)
 
+add_executable(generate_server src/generate_server.cu)
+target_link_libraries(generate_server PRIVATE transformer_core)
+
 # Link the bbpe tokenizer's C++ core (../tokenizer) so --tokenizer bbpe works.
 # It's a pure-C++, Python-free library, so we just compile its sources into a
 # static lib and link. Turn OFF to build with only the byte-level tokenizer.
@@ -50,6 +53,8 @@ if(WITH_BBPE)
         target_compile_features(bbpe_core PUBLIC cxx_std_17)
         target_link_libraries(train_transformer_cuda PRIVATE bbpe_core)
         target_compile_definitions(train_transformer_cuda PRIVATE WITH_BBPE=1)
+        target_link_libraries(generate_server PRIVATE bbpe_core)
+        target_compile_definitions(generate_server PRIVATE WITH_BBPE=1)
     else()
         message(WARNING "WITH_BBPE=ON but ${BBPE_DIR}/src not found; building without bbpe support")
     endif()

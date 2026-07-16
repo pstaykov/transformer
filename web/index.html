@@ -1,190 +1,239 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>KEVIN — a transformer built from scratch</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>KEVIN: a transformer built from scratch</title>
+  <link rel="stylesheet" href="/static/style.css?v=1784204762">
 </head>
 <body>
 
 <div class="scroll-progress" id="scroll-progress"></div>
 
 <nav id="nav">
-  <a href="#chat-section">chat</a>
-  <a href="#architecture">architecture</a>
-  <a href="#scratch">from scratch</a>
-  <a href="#training">training</a>
+  <a href="#chat-section" data-i18n="nav.chat">chat</a>
+  <a href="#architecture" data-i18n="nav.architecture">how it thinks</a>
+  <a href="#scratch" data-i18n="nav.scratch">from scratch</a>
+  <a href="#personality" data-i18n="nav.personality">personality</a>
+  <a href="#evolution" data-i18n="nav.evolution">evolution</a>
+  <a href="#training" data-i18n="nav.training">training</a>
+  <button type="button" id="lang-toggle" class="lang-toggle" aria-label="Switch language"></button>
 </nav>
 
 <header class="hero">
   <div class="wrap">
-    <div class="badge">no autograd · no pytorch · no huggingface</div>
+    <div class="badge" data-i18n="hero.badge">no shortcuts: nothing borrowed, nothing pre-built</div>
     <h1>KEVIN</h1>
-    <p class="tagline">
-      A decoder-only transformer with every gradient derived and coded by hand —
-      then implemented twice: once in NumPy, once in CUDA.
+    <p class="acronym" data-i18n="hero.acronym">K.E.V.I.N.: Keep Emitting Vaguely Incoherent Nonsense</p>
+    <p class="tagline" data-i18n="hero.tagline">
+      An AI that reads text and predicts what comes next, one word at a time. It isn't built on
+      any existing AI library: every part was written from scratch, then rebuilt a second time
+      to run in parallel on a graphics card, so it thinks far faster.
     </p>
 
     <div class="stats" id="stats">
-      <div class="stat" style="--i:0"><span class="stat-value" id="stat-params">—</span><span class="stat-label">parameters</span></div>
-      <div class="stat" style="--i:1"><span class="stat-value" id="stat-layers">—</span><span class="stat-label">layers</span></div>
-      <div class="stat" style="--i:2"><span class="stat-value" id="stat-heads">—</span><span class="stat-label">attention heads</span></div>
-      <div class="stat" style="--i:3"><span class="stat-value" id="stat-dmodel">—</span><span class="stat-label">d_model</span></div>
-      <div class="stat" style="--i:4"><span class="stat-value" id="stat-ctx">—</span><span class="stat-label">context</span></div>
-      <div class="stat" style="--i:5"><span class="stat-value" id="stat-step">—</span><span class="stat-label">trained steps</span></div>
+      <div class="stat" style="--i:0"><span class="stat-value" id="stat-params">—</span><span class="stat-label" data-i18n="stat.params">parameters</span></div>
+      <div class="stat" style="--i:1"><span class="stat-value" id="stat-layers">—</span><span class="stat-label" data-i18n="stat.layers">layers</span></div>
+      <div class="stat" style="--i:2"><span class="stat-value" id="stat-heads">—</span><span class="stat-label" data-i18n="stat.heads">attention heads</span></div>
+      <div class="stat" style="--i:3"><span class="stat-value" id="stat-dmodel">—</span><span class="stat-label" data-i18n="stat.dmodel">network width</span></div>
+      <div class="stat" style="--i:4"><span class="stat-value" id="stat-ctx">—</span><span class="stat-label" data-i18n="stat.ctx">context window</span></div>
+      <div class="stat" style="--i:5"><span class="stat-value" id="stat-step">—</span><span class="stat-label" data-i18n="stat.step">training steps</span></div>
     </div>
 
     <div class="load-state" id="load-state"></div>
   </div>
+
+  <div class="paper-peek" id="paper-peek" role="button" tabindex="0" aria-label="Open a page of the handwritten derivation">
+    <img src="/static/img/paper-peek.png" alt="">
+  </div>
 </header>
+
+<div class="paper-modal" id="paper-modal">
+  <div class="paper-modal-inner">
+    <button type="button" class="paper-modal-close" id="paper-modal-close" aria-label="Close">✕</button>
+    <div class="paper-modal-card">
+      <img src="/static/img/paper-page-1.png" alt="Page 1 of the transformer derivation">
+      <img src="/static/img/paper-page-2.png" alt="Page 2 of the transformer derivation">
+      <img src="/static/img/paper-page-3.png" alt="Page 3 of the transformer derivation">
+      <img src="/static/img/paper-page-4.png" alt="Page 4 of the transformer derivation">
+    </div>
+  </div>
+</div>
+
 
 <main class="wrap">
 
   <section id="chat-section">
-    <h2 class="reveal">Talk to it</h2>
-    <p class="lede reveal" style="--i:1">
-      Every token you see is one full forward pass through the network. There is no
-      KV cache — the model re-reads its entire context to produce each next token,
-      which is exactly why it arrives at the pace it does.
+    <h2 class="reveal" data-i18n="chat.title">Talk to it</h2>
+    <p class="lede reveal" style="--i:1" id="chat-lede" data-i18n="chat.lede">
+      Every single word you see costs the model a fresh, full pass of thinking. It re-reads the
+      whole conversation from scratch each time, with no memory shortcuts. That's the honest,
+      unaccelerated speed of a mind working things out live.
     </p>
 
-    <div class="chat reveal" style="--i:2">
+    <div class="mode-switch reveal" style="--i:2" id="mode-switch" role="tablist">
+      <button type="button" class="mode-btn active" id="mode-autocomplete" role="tab" aria-selected="true" data-i18n="chat.modeAutocomplete">autocomplete</button>
+      <button type="button" class="mode-btn" id="mode-chat" role="tab" aria-selected="false" data-i18n="chat.modeChat">chat</button>
+    </div>
+
+    <div class="chat reveal" style="--i:3">
       <div class="chat-log" id="chat-log">
-        <div class="empty-chat" id="empty-chat">Say something to KEVIN.</div>
+        <div class="empty-chat" id="empty-chat" data-i18n="chat.empty">Say something to KEVIN.</div>
       </div>
       <form class="chat-input" id="chat-form">
-        <input type="text" id="chat-text" autocomplete="off" placeholder="Ask KEVIN something…">
-        <button type="submit" id="chat-send">Send</button>
+        <input type="text" id="chat-text" autocomplete="off" data-i18n-placeholder="chat.placeholder" placeholder="Ask KEVIN something…">
+        <button type="button" id="chat-clear" class="secondary" data-i18n="chat.clear">Start over</button>
+        <button type="button" id="chat-continue" class="secondary" hidden data-i18n="chat.continueReply">Continue</button>
+        <button type="submit" id="chat-send" data-i18n="chat.send">Send</button>
       </form>
       <div class="chat-meta" id="chat-meta"></div>
     </div>
   </section>
 
   <section id="architecture">
-    <h2 class="reveal">The architecture</h2>
-    <p class="lede reveal" style="--i:1">
-      A LLaMA-style pre-norm decoder stack: RMSNorm instead of LayerNorm, a SwiGLU
-      feed-forward network instead of a plain MLP, and learned positional embeddings.
-      Numbers below are read from the loaded checkpoint, not hardcoded.
+    <h2 class="reveal" data-i18n="arch.title">How it thinks</h2>
+    <p class="lede reveal" style="--i:1" data-i18n="arch.lede">
+      A transformer compares every word in a sentence to every other word, deciding which ones
+      matter most for guessing what comes next. It does this again and again through many stacked
+      layers, each one sharpening the guess a little further. Every number below is read live from
+      the trained model, not made up for show.
     </p>
 
     <div class="arch">
-      <div class="arch-box io reveal">token ids <span class="dim" id="arch-in">(B, T)</span></div>
+      <div class="arch-box io reveal"><span data-i18n="arch.tokenIds">input words</span> <span class="dim" id="arch-in">(B, T)</span></div>
       <div class="arch-arrow reveal" style="--d:0s"></div>
 
       <div class="arch-box reveal">
-        <div class="arch-title">Embedding</div>
-        <div class="arch-sub">token embedding + <em>learned</em> positional embedding</div>
+        <div class="arch-title" data-i18n="arch.embTitle">Embedding</div>
+        <div class="arch-sub" data-i18n-html="arch.embSub">turns each word into numbers, and adds a sense of <em>where</em> it sits in the sentence</div>
         <div class="arch-shape" id="arch-emb">—</div>
       </div>
       <div class="arch-arrow reveal" style="--d:0.3s"></div>
 
       <div class="arch-block reveal">
-        <div class="arch-block-label"><span id="arch-nlayers">—</span> × TransformerBlock</div>
+        <div class="arch-block-label"><span id="arch-nlayers">—</span> <span data-i18n="arch.blockLabel">× layers of reasoning, stacked</span></div>
         <div class="arch-inner">
-          <div class="arch-box sub">RMSNorm</div>
+          <div class="arch-box sub" data-i18n="arch.rmsnorm">RMSNorm</div>
           <div class="arch-arrow small" style="--d:0.6s"></div>
           <div class="arch-box sub attn">
-            <div class="arch-title">Multi-Head Attention</div>
+            <div class="arch-title" data-i18n="arch.attnTitle">Multi-Head Attention</div>
             <div class="arch-sub" id="arch-attn">—</div>
-            <div class="arch-note">causal mask · all heads in one batched matmul</div>
+            <div class="arch-note" data-i18n="arch.attnNote">looks back over everything said so far, weighing every earlier word at once</div>
           </div>
-          <div class="residual">＋ residual</div>
+          <div class="residual" data-i18n="arch.residual">＋ carries the original signal forward</div>
           <div class="arch-arrow small" style="--d:0.9s"></div>
-          <div class="arch-box sub">RMSNorm</div>
+          <div class="arch-box sub" data-i18n="arch.rmsnorm">RMSNorm</div>
           <div class="arch-arrow small" style="--d:1.2s"></div>
           <div class="arch-box sub mlp">
-            <div class="arch-title">SwiGLU MLP</div>
+            <div class="arch-title" data-i18n="arch.mlpTitle">SwiGLU MLP</div>
             <div class="arch-sub" id="arch-mlp">—</div>
-            <div class="arch-note">Swish gate × value · β is a <em>learned</em> parameter</div>
+            <div class="arch-note" data-i18n-html="arch.mlpNote">a small internal decision about which ideas to keep and which to drop, shaped entirely by training</div>
           </div>
-          <div class="residual">＋ residual</div>
+          <div class="residual" data-i18n="arch.residual">＋ carries the original signal forward</div>
         </div>
       </div>
       <div class="arch-arrow reveal" style="--d:1.5s"></div>
 
-      <div class="arch-box reveal"><div class="arch-title">RMSNorm</div><div class="arch-sub">final norm</div></div>
+      <div class="arch-box reveal"><div class="arch-title" data-i18n="arch.rmsnorm">RMSNorm</div><div class="arch-sub" data-i18n="arch.finalNorm">one last check</div></div>
       <div class="arch-arrow reveal" style="--d:1.8s"></div>
       <div class="arch-box reveal">
-        <div class="arch-title">Output projection</div>
+        <div class="arch-title" data-i18n="arch.outTitle">Output projection</div>
         <div class="arch-shape" id="arch-out">—</div>
-        <div class="arch-note">untied from the input embedding</div>
+        <div class="arch-note" data-i18n="arch.outNote">its own independent read of the vocabulary, separate from how it reads words in</div>
       </div>
       <div class="arch-arrow reveal" style="--d:2.1s"></div>
-      <div class="arch-box io reveal">logits <span class="dim" id="arch-logits">(B, T, vocab)</span></div>
+      <div class="arch-box io reveal"><span data-i18n="arch.logits">raw predictions</span> <span class="dim" id="arch-logits">(B, T, vocab)</span></div>
     </div>
   </section>
 
   <section id="scratch">
-    <h2 class="reveal">Built from scratch, three times over</h2>
+    <h2 class="reveal" data-i18n="scratch.title">Built from scratch</h2>
 
     <div class="cards">
       <article class="card reveal" style="--i:0">
-        <div class="card-tag">the math</div>
-        <h3>Every backward pass, by hand</h3>
-        <p>
-          No autograd anywhere. The gradient of attention, RMSNorm, SwiGLU, softmax,
-          cross-entropy and the embedding scatter are each derived on paper and written
-          out as code.
+        <div class="card-tag" data-i18n="scratch.card1.tag">the math</div>
+        <h3 data-i18n="scratch.card1.h3">Every bit of learning, worked out by hand</h3>
+        <p data-i18n="scratch.card1.p1">
+          The math the model uses to learn from its mistakes (attention, internal checks,
+          predictions) was worked out on paper and turned directly into code.
         </p>
-        <p>
-          The softmax backward never materializes the Jacobian — it uses the
-          <code>s ⊙ (g − Σ s·g)</code> identity so it stays batched. Cross-entropy
-          supports <code>ignore_index</code>, which is what makes SFT possible:
-          loss is computed on assistant turns only.
+        <p data-i18n-html="scratch.card1.p2">
+          It's shaped so thousands of examples can be worked through at once instead of one at a
+          time. Training can also be told exactly which parts of a conversation to learn from,
+          which is what makes it possible to teach the model to hold a conversation, rather than
+          just ramble.
         </p>
       </article>
 
       <article class="card reveal" style="--i:1">
-        <div class="card-tag">the gpu</div>
-        <h3>A CUDA engine, mirrored 1:1</h3>
-        <p>
-          A standalone C++17/CUDA trainer at full feature parity with the NumPy one —
-          same architecture, same init scales, same numerics, same checkpoints.
-        </p>
-        <p>
-          Twenty-three hand-written kernels — <code>k_rmsnorm_backward</code>,
-          <code>k_swiglu_backward</code>, <code>k_softmax_forward</code>,
-          <code>k_embedding_backward</code> and friends — with shared-memory block reductions
-          and atomic gradient accumulation. cuBLAS handles the matmuls; everything
-          around them is hand-rolled, including RAII device buffers that stop
-          reallocating once training reaches steady state.
+        <div class="card-tag" data-i18n="scratch.card2.tag">the gpu</div>
+        <h3 data-i18n="scratch.card2.h3">Rebuilt to run in parallel on a graphics card</h3>
+        <p data-i18n="scratch.card2.p1">
+          A regular processor works through problems one at a time. A graphics card has thousands
+          of small cores that can all work at once, so training was rewritten to split its work
+          across all of them. That's what makes training dramatically faster, without changing
+          anything about what the model actually learns.
         </p>
       </article>
 
       <article class="card reveal" style="--i:2">
-        <div class="card-tag">the tokenizer</div>
-        <h3>Byte-level BPE, in C++</h3>
-        <p>
-          Not HuggingFace <code>tokenizers</code> — a from-scratch trainer and encoder.
-          Merge selection runs off a max-heap with an inverted pair→word index and lazy
-          deletion, so each merge only re-counts the words it actually touched.
+        <div class="card-tag" data-i18n="scratch.card3.tag">the tokenizer</div>
+        <h3 data-i18n="scratch.card3.h3">Its own way of reading text</h3>
+        <p data-i18n-html="scratch.card3.p1">
+          Before it can read anything, text has to be broken into pieces it understands. That
+          splitter was also built from scratch.
         </p>
-        <p>
-          256 byte tokens as the base vocabulary means zero OOV. Pretokenization is a
-          hand-written UTF-8 state machine reproducing the GPT-4 splitting rules,
-          right down to capping digit runs at three characters.
+        <p data-i18n="scratch.card3.p2">
+          So no word, emoji, or symbol in any language is ever a mystery to it: everything can be
+          broken down to raw bytes as a last resort.
         </p>
       </article>
     </div>
   </section>
 
+  <section id="personality">
+    <h2 class="reveal" data-i18n="pers.title">Kevin's personality</h2>
+    <p class="lede reveal" style="--i:1" data-i18n="pers.lede">
+      Feed it the start of a sentence and it just keeps going, no chat template, no persona
+      instructions. Whatever comes out is entirely what the model picked up from training. Here's
+      the same handful of openers, and what it actually does with them.
+    </p>
+
+    <div class="pers-grid" id="pers-grid"></div>
+  </section>
+
+  <section id="evolution">
+    <h2 class="reveal" data-i18n="evo.title">Watching it learn to talk</h2>
+    <p class="lede reveal" style="--i:1" data-i18n-html="evo.lede">
+      The exact same question, asked to the exact same model, but frozen at different moments
+      while it was still learning. <span id="evo-prompt-count">—</span> snapshots, same settings
+      every time. This is the raw, still-learning model completing a thought, not the polished
+      assistant you chatted with above.
+    </p>
+
+    <div class="evo-prompt reveal" style="--i:2">
+      <span data-i18n="evo.promptLabel">prompt</span> <span id="evo-prompt">—</span>
+    </div>
+
+    <div class="evo-timeline" id="evo-timeline"></div>
+    <div class="empty-state reveal" id="evo-empty" hidden></div>
+  </section>
+
   <section id="training">
-    <h2 class="reveal">Training</h2>
-    <p class="lede reveal" style="--i:1">
-      Loss and perplexity, straight from the <code>metrics.csv</code> the trainer writes
-      each step. Optimizer is plain SGD — hand-written, like everything else.
+    <h2 class="reveal" data-i18n="training.title">Training</h2>
+    <p class="lede reveal" style="--i:1" data-i18n-html="training.lede">
+      A live look at how the model actually improved over time, taken straight from the
+      training run itself, nothing staged or cleaned up after the fact.
     </p>
 
     <div class="metrics-summary reveal" id="metrics-summary" style="--i:2"></div>
     <div class="charts">
       <figure class="chart reveal" style="--i:3">
-        <figcaption>Training loss</figcaption>
+        <figcaption data-i18n="training.chartLoss">Mistakes over time</figcaption>
         <canvas id="chart-loss" width="900" height="300"></canvas>
       </figure>
       <figure class="chart reveal" style="--i:4">
-        <figcaption>Perplexity <span class="dim">(log scale)</span></figcaption>
+        <figcaption><span data-i18n="training.chartPpl">Uncertainty</span> <span class="dim" data-i18n="training.logScale">(zoomed in)</span></figcaption>
         <canvas id="chart-ppl" width="900" height="300"></canvas>
       </figure>
     </div>
@@ -199,6 +248,6 @@
   </div>
 </footer>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=1784209515"></script>
 </body>
 </html>

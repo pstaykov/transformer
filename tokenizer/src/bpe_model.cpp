@@ -61,6 +61,16 @@ void Tokenizer::add_special_token(const std::string& text, TokenId id) {
               [](const std::string& a, const std::string& b){ return a.size() > b.size(); });
 }
 
+void Tokenizer::remap_special_token(const std::string& new_text, TokenId id) {
+    auto it = special_id_to_text_.find(id);
+    if (it != special_id_to_text_.end()) {
+        special_text_to_id_.erase(it->second);
+        auto& v = specials_by_len_desc_;
+        v.erase(std::remove(v.begin(), v.end(), it->second), v.end());
+    }
+    add_special_token(new_text, id);
+}
+
 std::vector<TokenId> Tokenizer::encode(const std::string& text) const {
     std::vector<TokenId> result;
     result.reserve(text.size() / 3 + 4);

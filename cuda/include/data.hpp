@@ -48,6 +48,21 @@ struct DataTokenizer {
         return out;
     }
 
+    std::string decode(const std::vector<int>& ids) const {
+        if (is_bbpe) {
+#ifdef WITH_BBPE
+            std::vector<bbpe::TokenId> tid(ids.begin(), ids.end());
+            return bpe->decode(tid);
+#else
+            return "";
+#endif
+        }
+        std::string out;
+        out.reserve(ids.size());
+        for (int id : ids) if (id >= 0 && id < 256) out.push_back((char)(unsigned char)id);
+        return out;
+    }
+
     int vocab_size() const { return vsize; }
 };
 

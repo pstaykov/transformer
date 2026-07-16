@@ -41,6 +41,11 @@ sft_metrics.csv
 
 # Datasets
 /KEVINDATA
+data/*.jsonl
+
+# Monitor script runtime artifacts
+cuda/monitor.log
+cuda/monitor.pid
 
 # Email credentials for training progress notifications
 email.env

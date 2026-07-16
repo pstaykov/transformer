@@ -1,0 +1,53 @@
+{
+  "prompt": "The weather today is",
+  "samples": [
+    {
+      "step": 50000,
+      "loss": 3.28374,
+      "perplexity": 26.6755,
+      "text": " to be destroyed, and the weather is over to all sorts of rain is much more than a year. But the snow is a more expensive place than the rain and rain is more difficult to make it more"
+    },
+    {
+      "step": 100000,
+      "loss": 3.04465,
+      "perplexity": 21.0027,
+      "text": " the beginning of the fall and end of the season. That\u2019s because the weather is not the only thing that needs to be done but it is the best time to start a good weather in the summer."
+    },
+    {
+      "step": 200000,
+      "loss": 3.01431,
+      "perplexity": 20.3751,
+      "text": " not only mild, it is also the result of human activities. The most serious impacts to the environment are habitat loss, environmental degradation and habitat loss. This is the reason why the United States is one of the"
+    },
+    {
+      "step": 300000,
+      "loss": 2.87648,
+      "perplexity": 17.7518,
+      "text": " very warm so we can enjoy our little one\u2019s life. But if we don\u2019t like the best and most affordable air conditioning you can keep it in our house, we can make it in a safe place"
+    },
+    {
+      "step": 400000,
+      "loss": 2.81228,
+      "perplexity": 16.6479,
+      "text": " very bad because it is bad because of the weather. Because of the great weather, the temperature of the ocean is really bad.\nI think that the climate of the region is in an uncertain and dangerous condition."
+    },
+    {
+      "step": 500000,
+      "loss": 2.82257,
+      "perplexity": 16.82,
+      "text": " very cold and dry and hot. The hot winters are mild, and the weather has not been very cold since the beginning of the 13th century. The cold winters are generally the same as the summer months."
+    },
+    {
+      "step": 600000,
+      "loss": 2.76805,
+      "perplexity": 15.9275,
+      "text": " very warm for many years now. In some places, the temperatures are so cold that the heat and humidity will get trapped in the ice. But it is very cold for these very small amounts of ice to "
+    },
+    {
+      "step": 698000,
+      "loss": 2.72876,
+      "perplexity": 15.314,
+      "text": " very cold and dry and hot. The hot springs are mostly located in the Northern hemisphere and the warm springs are located in the Southern hemisphere. In the north of the country, in the northern part of the "
+    }
+  ]
+}

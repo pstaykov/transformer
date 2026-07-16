@@ -21,6 +21,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 import threading
 import time
 
@@ -28,7 +29,7 @@ import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from utils import fp8
 
@@ -41,7 +42,7 @@ fp8.ENABLED = False
 from model import Transformer                       # noqa: E402
 from utils.checkpoint import count_params           # noqa: E402
 from utils.ckpt_convert import load_any             # noqa: E402
-from utils.generate import generate_stream, render_chat_prompt  # noqa: E402
+from utils.generate import generate_stream, render_chat_prompt, render_chat_prompt_continue  # noqa: E402
 from utils.tokenizer import load_tokenizer          # noqa: E402
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -53,6 +54,7 @@ app = FastAPI(title="KEVIN")
 STATE = {
     "model": None,
     "tokenizer": None,
+    "tok_vocab": None,
     "config": None,
     "step": 0,
     "params": 0,
@@ -61,6 +63,25 @@ STATE = {
     "error": None,
     "tokens_per_sec": None,
     "metrics_path": "metrics.csv",
+    # "numpy" (utils/generate.py on the CPU model) or "cuda" (generate_server
+    # subprocess below, GPU inference). cuda_proc is the long-lived
+    # subprocess; see start_cuda_engine().
+    "engine": "numpy",
+    "cuda_proc": None,
+    # The chat-finetuned checkpoint (SFT on top of the base model above),
+    # used by /api/chat's "chat" mode for real back-and-forth conversation.
+    # The base model/engine above stay dedicated to "autocomplete" mode (raw
+    # continuation, no chat template) - the two were trained differently and
+    # answer differently, so they're kept as fully separate model instances
+    # rather than one checkpoint doing double duty. Mirrors the fields above.
+    "chat_model": None,
+    "chat_config": None,
+    "chat_step": 0,
+    "chat_params": 0,
+    "chat_ckpt_path": None,
+    "chat_error": None,
+    "chat_engine": "numpy",
+    "chat_cuda_proc": None,
 }
 
 # Transformer.forward() (model.py) stashes intermediate activations on `self`
@@ -152,9 +173,14 @@ def _prune_stale_ips(now):
             del log[ip]
 
 
+_EXEMPT_IPS = {"127.0.0.1", "::1"}  # loopback: trusted, never rate-limited or banned
+
+
 @app.middleware("http")
 async def zero_trust_gate(request: Request, call_next):
     ip = request.client.host if request.client else "unknown"
+    if ip in _EXEMPT_IPS:
+        return await call_next(request)
     now = time.time()
 
     with _SECURITY_LOCK:
@@ -194,12 +220,33 @@ async def zero_trust_gate(request: Request, call_next):
 
 class ChatRequest(BaseModel):
     messages: list[dict]
-    max_new_tokens: int = 96
+    max_new_tokens: int = 32
     temperature: float = 0.8
     top_k: int = 40
     top_p: float = 0.95
     system: str | None = None
     seed: int | None = None
+    # When true, skip the <|user|>/<|assistant|> chat template and feed the
+    # concatenated message text straight to the model as a raw continuation -
+    # plain autocomplete instead of instruction-style chat.
+    raw: bool = False
+    # Which loaded model answers this request: "autocomplete" (the base
+    # model, STATE["model"]) or "chat" (the SFT-finetuned STATE["chat_model"]).
+    # Independent of `raw` above - the UI pairs autocomplete+raw=True and
+    # chat+raw=False, but the two axes are orthogonal on the server.
+    mode: str = "autocomplete"
+    # When true, keep generating the last message (an assistant reply that
+    # already stopped) instead of opening a new turn - the "Continue" button
+    # in chat mode. Ignored when raw is true, since raw has no turns to
+    # continue in the first place.
+    continue_reply: bool = False
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v):
+        if v not in ("autocomplete", "chat"):
+            raise ValueError('mode must be "autocomplete" or "chat"')
+        return v
 
     @field_validator("messages")
     @classmethod
@@ -209,7 +256,12 @@ class ChatRequest(BaseModel):
         for m in v:
             if not isinstance(m, dict) or "role" not in m or "content" not in m:
                 raise ValueError("each message needs a 'role' and 'content'")
-            m["content"] = str(m["content"])[:MAX_MESSAGE_CHARS]
+            # Keep the *tail*, not the head: the model itself only ever attends
+            # to its most recent max_len tokens (see generate_server.cu's
+            # sliding window), so clamping from the front would freeze the
+            # model on a message's opening chars forever, however much more
+            # gets typed after them - never actually reaching the model.
+            m["content"] = str(m["content"])[-MAX_MESSAGE_CHARS:]
         return v
 
     @field_validator("max_new_tokens")
@@ -237,11 +289,18 @@ class ChatRequest(BaseModel):
     def _clamp_system(cls, v):
         return v[:MAX_MESSAGE_CHARS] if v else v
 
+    @model_validator(mode="after")
+    def _validate_continue_reply(self):
+        if self.continue_reply and (not self.messages or self.messages[-1]["role"] != "assistant"):
+            raise ValueError("continue_reply requires a last message with role 'assistant'")
+        return self
+
 
 def load_model(ckpt_path, tokenizer_kind, tokenizer_path, num_heads, vocab_size):
     """Load the tokenizer and (if it exists) the checkpoint into STATE."""
     tokenizer, tok_vocab = load_tokenizer(tokenizer_kind, tokenizer_path, vocab_size)
     STATE["tokenizer"] = tokenizer
+    STATE["tok_vocab"] = tok_vocab
     STATE["tokenizer_name"] = (
         f"bbpe ({os.path.basename(tokenizer_path)})" if tokenizer_kind == "bbpe"
         else "byte-level fallback"
@@ -286,12 +345,161 @@ def load_model(ckpt_path, tokenizer_kind, tokenizer_path, num_heads, vocab_size)
           f"in {time.time() - t0:.1f}s: {config}")
 
 
+def load_chat_model(ckpt_path, num_heads, tok_vocab):
+    """Load the SFT-finetuned checkpoint used by /api/chat's "chat" mode.
+
+    Reuses STATE["tokenizer"] (the finetune continues training from the base
+    checkpoint, so it shares the same vocabulary) rather than loading a
+    second tokenizer instance. Missing/mismatched checkpoints are recorded in
+    STATE["chat_error"] rather than raised - chat mode is an optional extra
+    on top of the always-available autocomplete demo, so its absence
+    shouldn't stop the server from starting.
+    """
+    STATE["chat_ckpt_path"] = ckpt_path
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        STATE["chat_error"] = f"no chat checkpoint at {ckpt_path}" if ckpt_path else "no --chat-ckpt given"
+        print(f"[serve] {STATE['chat_error']} - chat mode disabled")
+        return
+
+    print(f"[serve] loading chat model {ckpt_path} ...")
+    t0 = time.time()
+    params, config, step = load_any(ckpt_path, num_heads=num_heads)
+
+    if config["vocab_size"] != tok_vocab:
+        STATE["chat_error"] = (
+            f"chat checkpoint vocab_size={config['vocab_size']} but the "
+            f"{STATE['tokenizer_name']} tokenizer has vocab_size={tok_vocab}. "
+            "The tokenizer must match the one used for training."
+        )
+        print(f"[serve] {STATE['chat_error']}")
+        return
+
+    model = Transformer(
+        vocab_size=config["vocab_size"],
+        d_model=config["d_model"],
+        num_heads=config["num_heads"],
+        num_layers=config["num_layers"],
+        d_ff=config["d_ff"],
+        max_len=config["max_len"],
+    )
+    model.load_params(params)
+
+    STATE["chat_model"] = model
+    STATE["chat_config"] = config
+    STATE["chat_step"] = step
+    STATE["chat_params"] = count_params(model.params())
+    STATE["chat_error"] = None
+
+    print(f"[serve] loaded chat model {STATE['chat_params']:,} params (step {step}) "
+          f"in {time.time() - t0:.1f}s: {config}")
+
+
+def _spawn_cuda_engine(binary_path, ckpt_path, tokenizer_kind, tokenizer_path, vocab_size, label):
+    """Launch cuda/build/generate_server as a long-lived subprocess for one
+    checkpoint. Returns the Popen once it's reported ready, or None (logging
+    why) if the binary is missing or fails to start - callers fall back to
+    the numpy engine for that model in that case, so chat still works even
+    without a CUDA build.
+
+    Spawning a fresh subprocess per chat request would pay CUDA-context +
+    cuBLAS-handle + checkpoint-load setup cost (about a second) on every
+    turn, so instead one process is started here per model and fed requests
+    over stdin/stdout for the life of the server (see generate_server.cu's
+    protocol comment).
+    """
+    if not os.path.exists(binary_path):
+        print(f"[serve] --engine cuda requested but {binary_path} doesn't exist "
+              f"(build it with cmake --build cuda/build --target generate_server); "
+              f"{label} staying on numpy")
+        return None
+
+    print(f"[serve] starting CUDA inference engine for {label}: {binary_path} ...")
+    proc = subprocess.Popen(
+        [binary_path, "--ckpt", ckpt_path, "--tokenizer", tokenizer_kind,
+         "--tokenizer-path", tokenizer_path, "--vocab-size", str(vocab_size)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
+    )
+    ready_line = proc.stdout.readline()
+    if not ready_line:
+        print(f"[serve] CUDA engine ({binary_path}) exited before reporting ready; "
+              f"{label} staying on numpy")
+        proc.wait()
+        return None
+
+    ready = json.loads(ready_line)
+    print(f"[serve] CUDA engine ready for {label}: step={ready['step']} "
+          f"vocab_size={ready['vocab_size']} max_len={ready['max_len']}")
+    return proc
+
+
+def start_cuda_engine(binary_path, ckpt_path, tokenizer_kind, tokenizer_path, vocab_size):
+    """Swap the base (autocomplete) model over to the CUDA engine.
+
+    load_model() above must have already populated STATE - this only
+    replaces the generation backend, not the /api/model metadata
+    (params/config/step stay sourced from the CPU-side numpy load, which is
+    one cheap one-time parse either way).
+    """
+    if STATE["model"] is None:
+        print("[serve] --engine cuda requested but no checkpoint loaded; staying on numpy")
+        return
+    proc = _spawn_cuda_engine(binary_path, ckpt_path, tokenizer_kind, tokenizer_path, vocab_size, "autocomplete")
+    if proc is not None:
+        STATE["engine"] = "cuda"
+        STATE["cuda_proc"] = proc
+
+
+def start_chat_cuda_engine(binary_path, ckpt_path, tokenizer_kind, tokenizer_path, vocab_size):
+    """Swap the chat (SFT-finetuned) model over to the CUDA engine."""
+    if STATE["chat_model"] is None:
+        print("[serve] --engine cuda requested but no chat checkpoint loaded; staying on numpy")
+        return
+    proc = _spawn_cuda_engine(binary_path, ckpt_path, tokenizer_kind, tokenizer_path, vocab_size, "chat")
+    if proc is not None:
+        STATE["chat_engine"] = "cuda"
+        STATE["chat_cuda_proc"] = proc
+
+
+def cuda_generate_stream(proc, prompt, max_new_tokens=64, temperature=0.8, top_k=40, top_p=0.95, seed=None):
+    """Generator with the same interface as utils/generate.py::generate_stream
+    (yields decoded text deltas), backed by the CUDA subprocess instead of the
+    numpy model. Sampling and stop-string handling happen inside
+    generate_server.cu, ported to match sample_from_logits/generate_stream
+    exactly - this just relays the request and streams the response lines."""
+    request = {
+        "prompt": prompt,
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+    }
+    if seed is not None:
+        request["seed"] = seed
+
+    proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.flush()
+
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError("CUDA generate_server exited unexpectedly")
+        msg = json.loads(line)
+        if "token" in msg:
+            yield msg["token"]
+        elif "error" in msg:
+            raise RuntimeError(msg["error"])
+        elif "done" in msg:
+            return
+
+
 @app.get("/api/model")
 def api_model():
     cfg = STATE["config"] or {}
+    chat_cfg = STATE["chat_config"] or {}
     return {
         "name": "KEVIN",
         "model_loaded": STATE["model"] is not None,
+        "engine": STATE["engine"],
         "error": STATE["error"],
         "ckpt_path": STATE["ckpt_path"],
         "tokenizer": STATE["tokenizer_name"],
@@ -300,6 +508,14 @@ def api_model():
         "tokens_per_sec": STATE["tokens_per_sec"],
         "config": cfg,
         "d_head": cfg["d_model"] // cfg["num_heads"] if cfg else None,
+        "chat": {
+            "model_loaded": STATE["chat_model"] is not None,
+            "engine": STATE["chat_engine"],
+            "error": STATE["chat_error"],
+            "ckpt_path": STATE["chat_ckpt_path"],
+            "step": STATE["chat_step"],
+            "params": STATE["chat_params"],
+        },
     }
 
 
@@ -351,9 +567,19 @@ def api_chat(req: ChatRequest):
     def events():
         global _queue_count
 
-        if STATE["model"] is None:
-            payload = {"error": STATE["error"] or "no model loaded"}
-            yield f"data: {json.dumps(payload)}\n\n"
+        if req.mode == "chat":
+            model, engine, cuda_proc, config = (
+                STATE["chat_model"], STATE["chat_engine"], STATE["chat_cuda_proc"], STATE["chat_config"],
+            )
+            not_loaded_error = STATE["chat_error"] or "no chat model loaded"
+        else:
+            model, engine, cuda_proc, config = (
+                STATE["model"], STATE["engine"], STATE["cuda_proc"], STATE["config"],
+            )
+            not_loaded_error = STATE["error"] or "no model loaded"
+
+        if model is None:
+            yield f"data: {json.dumps({'error': not_loaded_error})}\n\n"
             return
 
         # Reserve a queue slot up front so a burst of requests can't all pile
@@ -366,22 +592,55 @@ def api_chat(req: ChatRequest):
             _queue_count += 1
 
         try:
-            model, tokenizer = STATE["model"], STATE["tokenizer"]
+            tokenizer = STATE["tokenizer"]
             n, t0 = 0, time.time()
             try:
                 with GENERATION_LOCK:
-                    prompt = render_chat_prompt(req.messages, system=req.system)
-                    for delta in generate_stream(
-                        model, tokenizer, prompt,
-                        max_new_tokens=req.max_new_tokens,
-                        temperature=req.temperature,
-                        top_k=req.top_k,
-                        top_p=req.top_p,
-                        max_len=STATE["config"]["max_len"],
-                        seed=req.seed,
-                    ):
-                        n += 1
-                        yield f"data: {json.dumps({'token': delta})}\n\n"
+                    if req.raw:
+                        prompt = "".join(m["content"] for m in req.messages)
+                    elif req.continue_reply:
+                        prompt = render_chat_prompt_continue(req.messages, system=req.system)
+                    else:
+                        prompt = render_chat_prompt(req.messages, system=req.system)
+                    if engine == "cuda":
+                        token_iter = cuda_generate_stream(
+                            cuda_proc, prompt,
+                            max_new_tokens=req.max_new_tokens,
+                            temperature=req.temperature,
+                            top_k=req.top_k,
+                            top_p=req.top_p,
+                            seed=req.seed,
+                        )
+                    else:
+                        token_iter = generate_stream(
+                            model, tokenizer, prompt,
+                            max_new_tokens=req.max_new_tokens,
+                            temperature=req.temperature,
+                            top_k=req.top_k,
+                            top_p=req.top_p,
+                            max_len=config["max_len"],
+                            seed=req.seed,
+                        )
+                    try:
+                        for delta in token_iter:
+                            n += 1
+                            yield f"data: {json.dumps({'token': delta})}\n\n"
+                    finally:
+                        # The CUDA engine is one persistent subprocess shared by
+                        # every request, talking strict one-response-per-request
+                        # over stdin/stdout (see generate_server.cu). If the
+                        # client disconnects (e.g. a refresh) before token_iter
+                        # is exhausted, its remaining "token"/"done" lines are
+                        # still coming and still unread - abandoning them here
+                        # would leave them sitting in the pipe for the *next*
+                        # request's readline() to pick up, corrupting it with
+                        # this request's leftover output. Always finish reading
+                        # this request's response, even if there's no one left
+                        # to send it to, so the pipe is back in sync before the
+                        # lock is released.
+                        if engine == "cuda":
+                            for _ in token_iter:
+                                pass
             except Exception as e:
                 # Catches failures anywhere in this block - bad prompt data,
                 # tokenizer errors, OOM, etc. - not just ones raised inside
@@ -404,7 +663,11 @@ def api_chat(req: ChatRequest):
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    # no-store: a cached copy of the page (or a stale app.js under it) could
+    # reopen with pre-fix chat state instead of the blank session a restart
+    # is supposed to guarantee.
+    return FileResponse(os.path.join(WEB_DIR, "index.html"),
+                        headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
@@ -422,10 +685,29 @@ def main():
     parser.add_argument("--metrics-path", default="metrics.csv")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--engine", choices=["numpy", "cuda"], default="numpy",
+                        help="numpy runs generation on the CPU model.py port (default); "
+                             "cuda runs it on the GPU via cuda/build/generate_server, "
+                             "much faster and requires a CUDA build")
+    parser.add_argument("--cuda-binary", default="cuda/build/generate_server",
+                        help="only used with --engine cuda")
+    parser.add_argument("--chat-ckpt", default=os.environ.get("TRANSFORMER_CHAT_CKPT"),
+                        help="SFT-finetuned checkpoint used by /api/chat's chat mode "
+                             "(shares --tokenizer/--tokenizer-path/--vocab-size with --ckpt "
+                             "above, since the finetune continues training from it). "
+                             "Chat mode is disabled if this isn't given or doesn't exist.")
+    parser.add_argument("--chat-num-heads", type=int, default=None,
+                        help="only used for .npz chat checkpoints; defaults to --num-heads")
     args = parser.parse_args()
 
     STATE["metrics_path"] = args.metrics_path
     load_model(args.ckpt, args.tokenizer, args.tokenizer_path, args.num_heads, args.vocab_size)
+    if args.engine == "cuda":
+        start_cuda_engine(args.cuda_binary, args.ckpt, args.tokenizer, args.tokenizer_path, args.vocab_size)
+
+    load_chat_model(args.chat_ckpt, args.chat_num_heads or args.num_heads, STATE["tok_vocab"])
+    if args.engine == "cuda":
+        start_chat_cuda_engine(args.cuda_binary, args.chat_ckpt, args.tokenizer, args.tokenizer_path, args.vocab_size)
 
     import uvicorn
     print(f"[serve] http://{args.host}:{args.port}")

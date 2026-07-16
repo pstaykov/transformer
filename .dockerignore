@@ -1,0 +1,28 @@
+.git
+.idea
+.claude
+.vscode
+docs/
+
+# Python envs / caches
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+.eggs/
+
+# Build artifacts (built fresh inside the containers)
+cuda/build/
+tokenizer/build/
+
+# Large / generated data - mounted as volumes instead of baked into images
+KEVINDATA/
+cuda/checkpoints/
+sft_ckpts/
+checkpoints/
+tokenizer/tok_out/
+tokenizer/tok_out_kevindata/
+*.csv
+
+# Secrets
+email.env

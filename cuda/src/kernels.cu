@@ -11,12 +11,23 @@ constexpr int BLOCK = 256;
 
 // Block-wide reduction of `val` (sum) across all threads in the block.
 // Every thread gets the reduced result back (broadcast via shared mem slot 0).
+//
+// Halves the active count by ceil(n/2) rather than floor(n/2): floor-halving
+// (the textbook stride = blockDim.x/2 tree) silently drops the last element
+// whenever blockDim.x is odd at any point in the shrinking sequence - e.g.
+// blockDim.x=3 computes stride=1, combines slots 0 and 1, then stride=0 ends
+// the loop with slot 2 never added in. blockDim.x here is min(D, BLOCK) where
+// D is the softmax width T (the attention context length) or d_model, so any
+// non-power-of-2 T (i.e. almost every real prompt) corrupted softmax and thus
+// every attention output. Ceil-halving includes every element regardless of
+// parity at each step.
 __device__ float block_reduce_sum(float val, float* shared) {
     int tid = threadIdx.x;
     shared[tid] = val;
     __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) shared[tid] += shared[tid + stride];
+    for (int n = blockDim.x; n > 1; n = (n + 1) / 2) {
+        int half = (n + 1) / 2;
+        if (tid < n - half) shared[tid] += shared[tid + half];
         __syncthreads();
     }
     float result = shared[0];
@@ -28,8 +39,9 @@ __device__ float block_reduce_max(float val, float* shared) {
     int tid = threadIdx.x;
     shared[tid] = val;
     __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) shared[tid] = fmaxf(shared[tid], shared[tid + stride]);
+    for (int n = blockDim.x; n > 1; n = (n + 1) / 2) {
+        int half = (n + 1) / 2;
+        if (tid < n - half) shared[tid] = fmaxf(shared[tid], shared[tid + half]);
         __syncthreads();
     }
     float result = shared[0];

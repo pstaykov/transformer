@@ -44,6 +44,26 @@ def render_chat_prompt(messages, system=None):
     return "".join(parts)
 
 
+def render_chat_prompt_continue(messages, system=None):
+    """Build the prompt for the "Continue" button: keep generating the last
+    message (an assistant reply that already stopped) instead of opening a
+    fresh turn. Same layout as render_chat_prompt for every message before
+    the last one, but the last message's content has no trailing newline -
+    generation picks up exactly where it left off, mid-turn, rather than
+    starting a new <|assistant|> block.
+    """
+    parts = []
+    if system:
+        parts.append(f"{ROLE_TAGS['system']}\n{system}\n")
+    for m in messages[:-1]:
+        tag = ROLE_TAGS.get(m["role"], f"<|{m['role']}|>")
+        parts.append(f"{tag}\n{m['content']}\n")
+    last = messages[-1]
+    tag = ROLE_TAGS.get(last["role"], f"<|{last['role']}|>")
+    parts.append(f"{tag}\n{last['content']}")
+    return "".join(parts)
+
+
 def sample_from_logits(logits, temperature, top_k, top_p, rng):
     """Pick one token id from a (vocab_size,) logit vector."""
     if temperature <= 0:
@@ -112,6 +132,21 @@ def generate_stream(model, tokenizer, prompt, max_new_tokens=64, temperature=0.8
     if max_len is None:
         max_len = model.embedding.pos_emb.shape[0]
 
+    # If a stop string is registered as a single special token (see
+    # tokenizer/tools/remap_specials.cpp - tok_out_kevindata's tokenizer.bbpe
+    # repurposes 3 reserved slots for the real role tags), decoding it with
+    # skip_special_tokens=True (below) yields "" rather than the tag text, so
+    # the string search a few lines down would never see it. Stop on the
+    # sampled id directly for any stop string that tokenizes to exactly one
+    # id; the string search stays as the only mechanism for stop strings that
+    # aren't (yet) registered as specials, e.g. the byte tokenizer never has
+    # any.
+    stop_token_ids = set()
+    for s in stop_strings:
+        enc = list(tokenizer.encode(s))
+        if len(enc) == 1:
+            stop_token_ids.add(enc[0])
+
     rng = np.random.default_rng(seed)
     ids = list(tokenizer.encode(prompt))
     generated = []
@@ -121,6 +156,12 @@ def generate_stream(model, tokenizer, prompt, max_new_tokens=64, temperature=0.8
         context = ids[-max_len:]
         logits = model.forward(np.array([context], dtype=np.int64))
         next_id = sample_from_logits(logits[0, -1], temperature, top_k, top_p, rng)
+
+        if next_id in stop_token_ids:
+            decoded = tokenizer.decode(generated)
+            if len(decoded) > emitted:
+                yield decoded[emitted:]
+            return
 
         ids.append(next_id)
         generated.append(next_id)

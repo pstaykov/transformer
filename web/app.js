@@ -11,6 +11,8 @@ const I18N = {
       tagline: "Eine KI, die Text liest und vorhersagt, was als Nächstes kommt, Wort für Wort. Sie basiert auf "
         + "keiner bestehenden KI-Bibliothek: Jeder Teil wurde von Grund auf selbst geschrieben und dann ein "
         + "zweites Mal neu gebaut, um parallel auf einer Grafikkarte zu laufen und so viel schneller zu denken.",
+      credits: "Ein Projekt von <b>Peter S.</b> und <b>Carl W.</b> — Peter hat alles gebaut außer dem Tokenizer, "
+        + "den hat Carl gebaut.",
     },
     stat: { params: "Parameter", layers: "Schichten", heads: "Attention-Heads", dmodel: "Netzwerkbreite", ctx: "Kontextfenster", step: "Trainingsschritte" },
     chat: {
@@ -143,6 +145,8 @@ const I18N = {
       tagline: "An AI that reads text and predicts what comes next, one word at a time. It isn't built on any "
         + "existing AI library: every part was written from scratch, then rebuilt a second time to run in "
         + "parallel on a graphics card, so it thinks far faster.",
+      credits: "A project by <b>Peter S.</b> and <b>Carl W.</b> — Peter built everything except the tokenizer, "
+        + "which Carl built.",
     },
     stat: { params: "parameters", layers: "layers", heads: "attention heads", dmodel: "network width", ctx: "context window", step: "training steps" },
     chat: {

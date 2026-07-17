@@ -15,6 +15,9 @@ Both train with next-token prediction, log `step / loss / perplexity` to a
 conversation-format (SFT) data with a byte-level or a real byte-pair-encoding
 (bbpe) tokenizer.
 
+A project by **Peter S.** and **Carl W.** — Peter built everything except the
+tokenizer, which Carl built.
+
 ---
 
 ## Getting started (the fast path)

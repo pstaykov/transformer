@@ -80,7 +80,7 @@ services:
       - --metrics-path
       - /app/cuda/checkpoints/run3/metrics.csv
       - --chat-ckpt
-      - /app/cuda/checkpoints/sft_wildchat/latest.ckpt
+      - /app/cuda/checkpoints/sft_everyday/latest.ckpt
       - --host
       - "0.0.0.0"
       - --port

@@ -9,7 +9,7 @@
 # After this: ./train.sh to resume training, ./infer.sh to start the showcase
 # / chat server. For Docker instead, see ./setup-docker.sh.
 #
-# Any extra arguments are passed through to download_models.py, e.g.:
+# Any extra arguments are passed through to tools/download_models.py, e.g.:
 #   ./setup.sh --skip-chat        # only fetch the base model
 #   ./setup.sh --force            # re-download even if files already exist
 set -euo pipefail
@@ -36,7 +36,7 @@ else
 fi
 
 echo "== Downloading pretrained checkpoints + tokenizer from Hugging Face =="
-python download_models.py "$@"
+python tools/download_models.py "$@"
 
 cat <<'EOF'
 

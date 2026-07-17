@@ -2,9 +2,10 @@
 
 Loading and forward-passing through eight ~83M-param checkpoints is too slow
 to do live in serve.py on every page load, so this runs once, offline, and
-writes a small JSON file the frontend fetches statically:
+writes a small JSON file the frontend fetches statically. Run from the repo
+root:
 
-    python tools_gen_evolution.py --run-dir cuda/checkpoints/run3
+    python tools/gen_evolution.py --run-dir cuda/checkpoints/run3
 
 Output: web/data/evolution.json, a list of {step, loss, perplexity, text}.
 """
@@ -12,6 +13,9 @@ Output: web/data/evolution.json, a list of {step, loss, perplexity, text}.
 import argparse
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model import Transformer
 from utils.ckpt_convert import load_any

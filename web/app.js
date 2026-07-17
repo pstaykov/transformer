@@ -719,9 +719,11 @@ document.querySelectorAll(".card").forEach((card) => {
 let MODE = "autocomplete"; // "autocomplete" | "chat"
 
 // The server clamps this to max(16, context_window / 2) (128 tokens on every
-// checkpoint this project has trained, see serve.py's _max_new_tokens_cap) -
-// asking for more than that here would just get silently clamped anyway.
-const MAX_NEW_TOKENS = 128;
+// checkpoint this project has trained, see serve.py's _max_new_tokens_cap).
+// Kept well under that cap: a real chat reply from this small, 2k-example
+// SFT model is a sentence or two - letting it run to 128 tokens just gives a
+// turn that fails to stop more room to ramble before the budget runs out.
+const MAX_NEW_TOKENS = 64;
 
 let docText = "";
 let docBubble = null;

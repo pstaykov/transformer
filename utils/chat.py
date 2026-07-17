@@ -30,6 +30,14 @@ ROLE_TAGS = {
     "assistant": "<|assistant|>",
 }
 
+# One of tokenizer/tok_out_kevindata's 5 reserved special ids (32000-32004,
+# see tokenizer/tools/remap_specials.cpp) - encodes as a single token id
+# rather than ordinary BPE text. Appended after every assistant turn so the
+# model has an explicit, single-token way to signal "turn over" instead of
+# relying on it correctly spelling out the next role tag as literal text
+# (see utils/generate.py's DEFAULT_STOP_STRINGS for the matching stop logic).
+EOS_TAG = "<|endoftext|>"
+
 
 def load_conversations(path):
     """Load conversations from a .json or .jsonl file.
@@ -85,6 +93,11 @@ def render_conversation(tokenizer, messages):
         content_ids = tokenizer.encode(f"{content}\n")
         ids.extend(content_ids)
         mask.extend([role == "assistant"] * len(content_ids))
+
+        if role == "assistant":
+            eos_ids = tokenizer.encode(EOS_TAG)
+            ids.extend(eos_ids)
+            mask.extend([True] * len(eos_ids))
 
     return ids, mask
 

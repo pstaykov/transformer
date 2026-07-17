@@ -14,7 +14,7 @@ if [ -d .venv ]; then
 fi
 
 CKPT="${CKPT:-cuda/checkpoints/run3/latest.ckpt}"
-CHAT_CKPT="${CHAT_CKPT:-cuda/checkpoints/sft_wildchat/latest.ckpt}"
+CHAT_CKPT="${CHAT_CKPT:-cuda/checkpoints/sft_everyday/latest.ckpt}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-tokenizer/tok_out_kevindata/tokenizer.bbpe}"
 VOCAB_SIZE="${VOCAB_SIZE:-32005}"
 METRICS_PATH="${METRICS_PATH:-cuda/checkpoints/run3/metrics.csv}"

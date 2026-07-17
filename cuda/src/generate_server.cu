@@ -75,6 +75,7 @@ struct Request {
     double temperature = 0.8;
     int top_k = 40;
     double top_p = 0.95;
+    double repetition_penalty = 1.0;
     bool has_seed = false;
     unsigned long long seed = 0;
 };
@@ -87,6 +88,7 @@ static Request parse_request(const std::string& line) {
     if (auto* p = v.get("temperature")) r.temperature = p->num;
     if (auto* p = v.get("top_k")) r.top_k = (int)p->num;
     if (auto* p = v.get("top_p")) r.top_p = p->num;
+    if (auto* p = v.get("repetition_penalty")) r.repetition_penalty = p->num;
     if (auto* p = v.get("seed")) {
         if (p->type == minijson::JsonValue::Type::Num) {
             r.has_seed = true;
@@ -138,17 +140,35 @@ static std::string utf8_lenient_decode(const std::string& bytes) {
 // ---------------------------------------------------------------------------
 // Sampling: port of utils/generate.py::sample_from_logits.
 // ---------------------------------------------------------------------------
+// repetition_penalty follows Keskar et al.'s CTRL formulation (mirrors
+// utils/generate.py::sample_from_logits): every id in seen_ids gets divided
+// (if positive) or multiplied (if negative) by the penalty, applied before
+// temperature/top_k/top_p so it reshapes the distribution those act on.
+static void apply_repetition_penalty(std::vector<double>& l, double repetition_penalty,
+                                      const std::vector<int>& seen_ids) {
+    if (repetition_penalty == 1.0) return;
+    for (int id : seen_ids) {
+        l[id] = l[id] > 0 ? l[id] / repetition_penalty : l[id] * repetition_penalty;
+    }
+}
+
 static int sample_from_logits(std::vector<float>& logits, double temperature,
-                               int top_k, double top_p, std::mt19937_64& rng) {
+                               int top_k, double top_p, std::mt19937_64& rng,
+                               double repetition_penalty, const std::vector<int>& seen_ids) {
     int V = (int)logits.size();
     if (temperature <= 0.0) {
+        std::vector<double> l(V);
+        for (int i = 0; i < V; ++i) l[i] = (double)logits[i];
+        apply_repetition_penalty(l, repetition_penalty, seen_ids);
         int best = 0;
-        for (int i = 1; i < V; ++i) if (logits[i] > logits[best]) best = i;
+        for (int i = 1; i < V; ++i) if (l[i] > l[best]) best = i;
         return best;
     }
 
     std::vector<double> l(V);
-    for (int i = 0; i < V; ++i) l[i] = (double)logits[i] / temperature;
+    for (int i = 0; i < V; ++i) l[i] = (double)logits[i];
+    apply_repetition_penalty(l, repetition_penalty, seen_ids);
+    for (int i = 0; i < V; ++i) l[i] /= temperature;
 
     if (top_k > 0 && top_k < V) {
         std::vector<int> idx(V);
@@ -244,7 +264,15 @@ int main(int argc, char** argv) {
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
 
-    const std::vector<std::string> stop_strings = {"<|user|>", "<|system|>", "<|assistant|>"};
+    // "<|endoftext|>" (utils/chat.py::EOS_TAG) is a real single-token id -
+    // see tokenizer/tools/remap_specials.cpp - appended after every
+    // assistant turn during SFT (cuda/include/data.hpp's eos_tag()), so a
+    // model trained on the current data learns to end its turn with one
+    // token instead of spelling out the next role tag as literal text. The
+    // role tags stay listed as a fallback for checkpoints trained before
+    // EOS_TAG existed.
+    const std::vector<std::string> stop_strings = {
+        "<|endoftext|>", "<|user|>", "<|system|>", "<|assistant|>"};
 
     // If a stop string is registered as a single special token (see
     // tokenizer/tools/remap_specials.cpp), decode() with skip_special_tokens=true
@@ -302,7 +330,8 @@ int main(int argc, char** argv) {
                                        logits_dev + (size_t)(ctx_len - 1) * V,
                                        V * sizeof(float), cudaMemcpyDeviceToHost));
 
-                int next_id = sample_from_logits(last_logits, req.temperature, req.top_k, req.top_p, rng);
+                int next_id = sample_from_logits(last_logits, req.temperature, req.top_k, req.top_p, rng,
+                                                  req.repetition_penalty, context);
 
                 if (std::find(stop_token_ids.begin(), stop_token_ids.end(), next_id) != stop_token_ids.end()) {
                     std::string decoded = utf8_lenient_decode(tokenizer.decode(generated));

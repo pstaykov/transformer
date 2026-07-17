@@ -4,10 +4,10 @@ them where train.py, the CUDA trainer, and serve.py all expect to find them:
 
     kevinindustries/kevin-k2   (base model)  -> cuda/checkpoints/run3/latest.ckpt
                                               -> tokenizer/tok_out_kevindata/*
-    kevinindustries/kevin-chat (SFT chat)    -> cuda/checkpoints/sft_wildchat/latest.ckpt
+    kevinindustries/kevin-chat (SFT chat)    -> cuda/checkpoints/sft_everyday/latest.ckpt
 
-Run directly (python download_models.py) or via ./setup.sh, which also sets
-up the venv and Python deps first.
+Run directly (python tools/download_models.py) or via ./setup.sh, which also
+sets up the venv and Python deps first.
 """
 import argparse
 import os
@@ -15,11 +15,11 @@ import shutil
 
 from huggingface_hub import hf_hub_download
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-TOKENIZER_DIR = os.path.join(HERE, "tokenizer", "tok_out_kevindata")
-BASE_CKPT_DIR = os.path.join(HERE, "cuda", "checkpoints", "run3")
-CHAT_CKPT_DIR = os.path.join(HERE, "cuda", "checkpoints", "sft_wildchat")
+TOKENIZER_DIR = os.path.join(REPO_ROOT, "tokenizer", "tok_out_kevindata")
+BASE_CKPT_DIR = os.path.join(REPO_ROOT, "cuda", "checkpoints", "run3")
+CHAT_CKPT_DIR = os.path.join(REPO_ROOT, "cuda", "checkpoints", "sft_everyday")
 
 TOKENIZER_FILES = ["tokenizer/tokenizer.bbpe", "tokenizer/vocab.json", "tokenizer/merges.txt"]
 

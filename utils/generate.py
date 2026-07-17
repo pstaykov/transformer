@@ -12,19 +12,26 @@ Two properties of the model shape this code:
     whole context, so generation cost is O(context) per token and streaming is
     the natural interface - each token genuinely arrives one at a time.
 
-  * There is no EOS token. utils/chat.py's role tags ("<|assistant|>" etc.) are
-    byte/BPE-encoded as ordinary text rather than registered as special tokens,
-    so a model that learns the chat format signals "my turn is over" by emitting
-    the literal text "<|user|>". Stopping is therefore a string match on the
-    decoded output, not a token id check.
+  * utils/chat.py's role tags ("<|assistant|>" etc.) are byte/BPE-encoded as
+    ordinary text rather than registered as special tokens, so a model
+    relying on them alone would signal "my turn is over" only by emitting the
+    literal multi-token text "<|user|>" - fragile, since any one wrong token
+    in that sequence lets generation run on past where it should have
+    stopped. utils/chat.py::EOS_TAG ("<|endoftext|>") is a real single-token
+    id (see tokenizer/tools/remap_specials.cpp), appended after every
+    assistant turn in training, so the model has a one-token way to end its
+    turn instead. Both are included below and checked below via
+    stop_token_ids/decoded-substring search; the role tags stay as a
+    fallback for older checkpoints trained before EOS_TAG existed.
 """
 
 import numpy as np
 
-from utils.chat import ROLE_TAGS
+from utils.chat import EOS_TAG, ROLE_TAGS
 
-# A well-trained chat model ends its turn by starting the next role tag.
-DEFAULT_STOP_STRINGS = (ROLE_TAGS["user"], ROLE_TAGS["system"], ROLE_TAGS["assistant"])
+# A well-trained chat model ends its turn by emitting EOS_TAG (a single
+# token) or, failing that, by starting the next role tag.
+DEFAULT_STOP_STRINGS = (EOS_TAG, ROLE_TAGS["user"], ROLE_TAGS["system"], ROLE_TAGS["assistant"])
 
 
 def render_chat_prompt(messages, system=None):
@@ -64,12 +71,27 @@ def render_chat_prompt_continue(messages, system=None):
     return "".join(parts)
 
 
-def sample_from_logits(logits, temperature, top_k, top_p, rng):
-    """Pick one token id from a (vocab_size,) logit vector."""
+def sample_from_logits(logits, temperature, top_k, top_p, rng, repetition_penalty=1.0, seen_ids=None):
+    """Pick one token id from a (vocab_size,) logit vector.
+
+    repetition_penalty follows Keskar et al.'s CTRL formulation: every id in
+    seen_ids gets its logit divided (if positive) or multiplied (if negative)
+    by the penalty, making already-used tokens less likely without an outright
+    ban. Applied before temperature/top_k/top_p so it reshapes the
+    distribution those act on, not just the final draw.
+    """
     if temperature <= 0:
+        if repetition_penalty != 1.0 and seen_ids:
+            logits = logits.copy()
+            for tid in seen_ids:
+                logits[tid] = logits[tid] / repetition_penalty if logits[tid] > 0 else logits[tid] * repetition_penalty
         return int(np.argmax(logits))
 
-    logits = logits.astype(np.float64) / temperature
+    logits = logits.astype(np.float64)
+    if repetition_penalty != 1.0 and seen_ids:
+        for tid in seen_ids:
+            logits[tid] = logits[tid] / repetition_penalty if logits[tid] > 0 else logits[tid] * repetition_penalty
+    logits = logits / temperature
 
     if top_k:
         k = min(int(top_k), logits.shape[-1])
@@ -121,7 +143,7 @@ def _held_back(text, stop_strings):
 
 def generate_stream(model, tokenizer, prompt, max_new_tokens=64, temperature=0.8,
                     top_k=40, top_p=0.95, max_len=None, stop_strings=DEFAULT_STOP_STRINGS,
-                    seed=None):
+                    seed=None, repetition_penalty=1.0):
     """Yield the completion incrementally, one decoded text delta per token.
 
     max_len is the model's context window. It is a hard limit, not a suggestion:
@@ -155,7 +177,8 @@ def generate_stream(model, tokenizer, prompt, max_new_tokens=64, temperature=0.8
     for _ in range(max_new_tokens):
         context = ids[-max_len:]
         logits = model.forward(np.array([context], dtype=np.int64))
-        next_id = sample_from_logits(logits[0, -1], temperature, top_k, top_p, rng)
+        next_id = sample_from_logits(logits[0, -1], temperature, top_k, top_p, rng,
+                                      repetition_penalty=repetition_penalty, seen_ids=set(context))
 
         if next_id in stop_token_ids:
             decoded = tokenizer.decode(generated)

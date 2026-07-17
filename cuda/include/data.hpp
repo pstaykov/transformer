@@ -472,6 +472,13 @@ inline std::string role_tag(const std::string& role) {
     return "<|" + role + "|>";
 }
 
+// One of the tokenizer's 5 reserved special ids (32000-32004, see
+// tokenizer/tools/remap_specials.cpp) - a single token id rather than
+// ordinary BPE text. Appended after every assistant turn, matching
+// utils/chat.py::EOS_TAG, so the model has an explicit single-token way to
+// signal "turn over" instead of relying on spelling out the next role tag.
+inline const char* eos_tag() { return "<|endoftext|>"; }
+
 inline void render_conversation(const DataTokenizer& tok, const Conversation& msgs, Dataset& d) {
     for (const Message& m : msgs) {
         std::vector<int> tag_ids = tok.encode(role_tag(m.role) + "\n");
@@ -484,6 +491,13 @@ inline void render_conversation(const DataTokenizer& tok, const Conversation& ms
         for (int id : content_ids) {
             d.ids.push_back(id);
             d.mask.push_back(predict);
+        }
+        if (m.role == "assistant") {
+            std::vector<int> eos_ids = tok.encode(eos_tag());
+            for (int id : eos_ids) {
+                d.ids.push_back(id);
+                d.mask.push_back(1);
+            }
         }
     }
 }

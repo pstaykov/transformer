@@ -4,17 +4,21 @@ LLM or human watching a training run.
 Doesn't need the model loaded - just reads metrics.csv (if present) for a
 chart and the current step, and email.env for credentials.
 
-Usage:
-    python send_note.py "training running clean, loss trending down, GPU temps normal"
-    python send_note.py "step 60000: perplexity dropped below 50" --step 60000
-    python send_note.py --prompt "The" --completion "men in government need this ..." --step 60000
+Run from the repo root, e.g.:
+    python tools/send_note.py "training running clean, loss trending down, GPU temps normal"
+    python tools/send_note.py "step 60000: perplexity dropped below 50" --step 60000
+    python tools/send_note.py --prompt "The" --completion "men in government need this ..." --step 60000
     # multiple samples: repeat --prompt/--completion in matching order
-    python send_note.py --prompt "The" "Hello, I'm Kevin and" \\
-                         --completion "men in government need this ..." "I like to talk about ..." \\
-                         --step 60000
+    python tools/send_note.py --prompt "The" "Hello, I'm Kevin and" \\
+                               --completion "men in government need this ..." "I like to talk about ..." \\
+                               --step 60000
 """
 
 import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import notify
 

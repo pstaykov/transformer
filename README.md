@@ -69,8 +69,16 @@ transformer/
 │                       #   checkpoint I/O, chat/SFT data loading
 ├── cuda/               # standalone CUDA/cuBLAS trainer (its own README section)
 │   ├── src/  include/  CMakeLists.txt
+│   └── monitor_train.sh, monitor_and_notify.sh  # babysitter scripts, see docs/monitoring.md
 ├── tokenizer/          # C++ byte-pair-encoding tokenizer + Python bindings
-│   └── tok_out/        # a pretrained tokenizer (tokenizer.bbpe, vocab.json, ...)
+│   ├── tok_out/         # a pretrained tokenizer (tokenizer.bbpe, vocab.json, ...)
+│   └── demo_bindings.py # sanity-check the Python bindings encode/decode roundtrip
+├── tools/              # standalone maintenance scripts (not needed for train/infer)
+│   ├── download_models.py              # pull pretrained checkpoints/tokenizer (used by setup.sh)
+│   ├── convert_everyday_conversations.py  # regenerate data/everyday_conversations.jsonl
+│   ├── gen_evolution.py                # precompute the showcase site's "model over time" samples
+│   └── send_note.py                    # email a one-off training status note
+├── docs/               # longer how-tos (see docs/ for the full list)
 └── data/
     ├── tiny_corpus.txt            # tiny plain-text sample
     └── sample_conversations.json  # tiny chat/SFT sample
@@ -235,7 +243,7 @@ extension, which you build once:
 ```bash
 cd tokenizer
 bash build_py_client.sh          # builds & pip-installs the `bbpe_tokenizer` module
-python ../test.py                # sanity-check encode/decode roundtrip
+python demo_bindings.py          # sanity-check encode/decode roundtrip
 ```
 
 Then:
@@ -280,3 +288,19 @@ Shared by both trainers unless noted:
 CUDA-trainer-only: `--fp8` (enable simulated FP8), `--reset-step` (restart the
 step counter on resume). On resume the CUDA trainer takes the architecture from
 the checkpoint, so the arch flags above can be omitted.
+
+---
+
+## Tools & docs
+
+`tools/` (see [`tools/README.md`](tools/README.md)) holds standalone scripts
+that aren't part of the train/infer path itself — downloading pretrained
+weights, regenerating a dataset, precomputing showcase-site samples, emailing
+a training status update.
+
+`docs/` holds longer how-tos that don't fit in this README:
+
+- [`docs/continue-training-from-usb.md`](docs/continue-training-from-usb.md) —
+  moving a checkpoint + corpus to another machine via USB and resuming there.
+- [`docs/monitoring.md`](docs/monitoring.md) — what the `cuda/monitor_*.sh`
+  babysitter scripts do and when to use each.

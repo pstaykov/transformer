@@ -224,6 +224,15 @@ class ChatRequest(BaseModel):
     temperature: float = 0.8
     top_k: int = 40
     top_p: float = 0.95
+    # Discourages repeating a token already in the context (e.g. the model
+    # regenerating a whole prior turn verbatim, like "Hello! How can I help
+    # you today?" every time) - see utils/generate.py::sample_from_logits.
+    # Off by default (1.0 = no-op): it papered over the repetition instead of
+    # fixing it, and penalizing arbitrary context tokens distorts otherwise-
+    # coherent replies. Left in place (and still chat-mode-only, see
+    # api_chat below) in case it's worth revisiting once the EOS-token SFT
+    # actually teaches the model to stop on its own instead.
+    repetition_penalty: float = 1.0
     system: str | None = None
     seed: int | None = None
     # When true, skip the <|user|>/<|assistant|> chat template and feed the
@@ -283,6 +292,11 @@ class ChatRequest(BaseModel):
     @classmethod
     def _clamp_top_p(cls, v):
         return max(0.0, min(float(v), 1.0))
+
+    @field_validator("repetition_penalty")
+    @classmethod
+    def _clamp_repetition_penalty(cls, v):
+        return max(1.0, min(float(v), 2.0))
 
     @field_validator("system")
     @classmethod
@@ -460,7 +474,8 @@ def start_chat_cuda_engine(binary_path, ckpt_path, tokenizer_kind, tokenizer_pat
         STATE["chat_cuda_proc"] = proc
 
 
-def cuda_generate_stream(proc, prompt, max_new_tokens=64, temperature=0.8, top_k=40, top_p=0.95, seed=None):
+def cuda_generate_stream(proc, prompt, max_new_tokens=64, temperature=0.8, top_k=40, top_p=0.95,
+                          repetition_penalty=1.0, seed=None):
     """Generator with the same interface as utils/generate.py::generate_stream
     (yields decoded text deltas), backed by the CUDA subprocess instead of the
     numpy model. Sampling and stop-string handling happen inside
@@ -472,6 +487,7 @@ def cuda_generate_stream(proc, prompt, max_new_tokens=64, temperature=0.8, top_k
         "temperature": temperature,
         "top_k": top_k,
         "top_p": top_p,
+        "repetition_penalty": repetition_penalty,
     }
     if seed is not None:
         request["seed"] = seed
@@ -602,6 +618,13 @@ def api_chat(req: ChatRequest):
                         prompt = render_chat_prompt_continue(req.messages, system=req.system)
                     else:
                         prompt = render_chat_prompt(req.messages, system=req.system)
+                    # Repetition penalty is a chat-mode fix (stops the SFT model
+                    # parroting a prior turn like "Hello! How can I help you
+                    # today?" verbatim) - the base/autocomplete model was never
+                    # trained with it in mind, and penalizing arbitrary prompt
+                    # tokens (e.g. every letter in "The weather today is")
+                    # mangles plain continuation, so it's off outside chat mode.
+                    repetition_penalty = req.repetition_penalty if req.mode == "chat" else 1.0
                     if engine == "cuda":
                         token_iter = cuda_generate_stream(
                             cuda_proc, prompt,
@@ -609,6 +632,7 @@ def api_chat(req: ChatRequest):
                             temperature=req.temperature,
                             top_k=req.top_k,
                             top_p=req.top_p,
+                            repetition_penalty=repetition_penalty,
                             seed=req.seed,
                         )
                     else:
@@ -619,6 +643,7 @@ def api_chat(req: ChatRequest):
                             top_k=req.top_k,
                             top_p=req.top_p,
                             max_len=config["max_len"],
+                            repetition_penalty=repetition_penalty,
                             seed=req.seed,
                         )
                     try:

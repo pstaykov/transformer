@@ -1,8 +1,9 @@
-"""Demo of the bbpe_tokenizer Python bindings."""
+"""Demo of the bbpe_tokenizer Python bindings. Run from inside tokenizer/
+(python demo_bindings.py) after building the extension with build_py_client.sh."""
 
 import bbpe_tokenizer
 
-TOKENIZER_PATH = "tokenizer/tok_out/tokenizer.bbpe"
+TOKENIZER_PATH = "tok_out/tokenizer.bbpe"
 
 
 def main():

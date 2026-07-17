@@ -51,9 +51,9 @@ echo
 echo "== Fetching pretrained checkpoints + tokenizer from Hugging Face =="
 if command -v python3 >/dev/null 2>&1; then
     python3 -m pip show huggingface_hub >/dev/null 2>&1 || python3 -m pip install --user huggingface_hub
-    python3 download_models.py
+    python3 tools/download_models.py
 else
-    echo "python3 not found on the host - skipping. Run 'python download_models.py' manually" >&2
+    echo "python3 not found on the host - skipping. Run 'python tools/download_models.py' manually" >&2
     echo "(it just needs huggingface_hub; it doesn't need the rest of requirements.txt)." >&2
 fi
 
@@ -66,6 +66,6 @@ Done. Quick reference:
 
 Both containers read/write the same cuda/checkpoints/, tokenizer/tok_out*/,
 KEVINDATA/, and data/ folders on the host, so nothing needs to be copied in or
-out. Re-run 'python3 download_models.py --force' any time to refresh the
+out. Re-run 'python3 tools/download_models.py --force' any time to refresh the
 checkpoints/tokenizer from Hugging Face.
 EOF

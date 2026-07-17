@@ -18,6 +18,13 @@ conversation-format (SFT) data with a byte-level or a real byte-pair-encoding
 A project by **Peter S.** and **Carl W.** — Peter built everything except the
 tokenizer, which Carl built.
 
+**Licensing:** this repo has two separately owned, separately licensed
+parts. Everything except `tokenizer/` is © Peter Staykov, all rights
+reserved — see [`LICENSE`](LICENSE); no permission is granted to
+demo, present, or showcase it as your own work without Peter's prior
+written consent. `tokenizer/` is © Carl W., MIT-licensed — see
+[`tokenizer/LICENSE`](tokenizer/LICENSE).
+
 ---
 
 ## Getting started (the fast path)

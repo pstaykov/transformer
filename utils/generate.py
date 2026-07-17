@@ -47,6 +47,8 @@ def render_chat_prompt(messages, system=None):
     for m in messages:
         tag = ROLE_TAGS.get(m["role"], f"<|{m['role']}|>")
         parts.append(f"{tag}\n{m['content']}\n")
+        if m["role"] == "assistant":
+            parts.append(EOS_TAG)
     parts.append(f"{ROLE_TAGS['assistant']}\n")
     return "".join(parts)
 
@@ -65,6 +67,8 @@ def render_chat_prompt_continue(messages, system=None):
     for m in messages[:-1]:
         tag = ROLE_TAGS.get(m["role"], f"<|{m['role']}|>")
         parts.append(f"{tag}\n{m['content']}\n")
+        if m["role"] == "assistant":
+            parts.append(EOS_TAG)
     last = messages[-1]
     tag = ROLE_TAGS.get(last["role"], f"<|{last['role']}|>")
     parts.append(f"{tag}\n{last['content']}")

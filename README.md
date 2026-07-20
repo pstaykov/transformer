@@ -20,6 +20,11 @@ tokenizer, which Carl built.
 
 ---
 
+## Declaration of AI Usage
+I developed the python classes including forward and backward pass and the initial orchestration to the transformer class, as well as training loops. Claude code was used to implement fine tuning and the cpp version, as well as debugging. 
+
+---
+
 ## Getting started (the fast path)
 
 Pretrained checkpoints (base + chat-tuned) and the matching tokenizer are
